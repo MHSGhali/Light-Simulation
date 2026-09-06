@@ -145,6 +145,31 @@ ls_real ls_spectrum_mean(const Spectrum *a) {
     return sum / (ls_real)LS_NBINS;
 }
 
+SpectrumAcc ls_acc_zero(void) {
+    SpectrumAcc a;
+    memset(a.v, 0, sizeof a.v);
+    return a;
+}
+void ls_acc_add_scaled(SpectrumAcc *acc, const Spectrum *s, ls_real w) {
+    for (int i = 0; i < LS_NBINS; ++i) acc->v[i] += (ls_real)s->v[i] * w;
+}
+Spectrum ls_acc_mean(const SpectrumAcc *acc, uint64_t n) {
+    Spectrum s = ls_spectrum_zero();
+    if (n == 0) return s;
+    ls_real inv = 1.0 / (ls_real)n;
+    for (int i = 0; i < LS_NBINS; ++i) s.v[i] = (float)(acc->v[i] * inv);
+    return s;
+}
+
+/* Rectangle (bin-centred) rule: each sample represents a bin of width
+ * LS_SPECTRAL_STEP centred on its wavelength.
+ *
+ * A trapezoid rule was considered and REJECTED. It weights the first and last
+ * samples by 1/2, so a monochromatic spike placed in the edge bin would
+ * integrate to half its power -- energy silently vanishing at the band edges,
+ * with no way for a caller to notice. The rectangle rule makes
+ * ls_spectrum_monochromatic() carry exactly its stated power in EVERY bin,
+ * which is the invariant the 683 lm/W test depends on. */
 ls_real ls_spectrum_integrate(const Spectrum *a) {
     ls_real sum = 0.0;
     for (int i = 0; i < LS_NBINS; ++i) sum += (ls_real)a->v[i];

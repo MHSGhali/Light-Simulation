@@ -72,6 +72,18 @@ void test_spectral(void) {
         CHECK_NEAR(ls_radiometric(&mono), 1.0, 1e-6);
         CHECK_NEAR(ls_luminous_efficacy_band(&mono), 683.0, mono_tol);
 
+        /* Integral of V(lambda) over the band. The CIE 1931 tables are built so
+         * that the three CMF integrals are near-equal at ~106.857 nm; this pins
+         * the table transcription and the integration rule together. */
+        Spectrum unity = ls_spectrum_const(1.0);
+        double ybar_int = ls_spectrum_integrate_weighted(&unity, V);
+        CHECK_NEAR(ybar_int, 106.857, 1e-4);
+        CHECK_NEAR(ls_cmf_ybar_integral(), 106.857, 1e-4);
+        NOTE("integral of V(lambda) d(lambda) = %.4f nm", ybar_int);
+
+        /* Equal-energy illuminant E: LER = Km * int(ybar) / band width. */
+        CHECK_NEAR(ls_luminous_efficacy_band(&unity), 153.649, 1e-4);
+
         /* Far red carries power but almost no luminous flux. */
         Spectrum ir = ls_spectrum_monochromatic(800.0, 1.0);
         CHECK(ls_radiometric(&ir) > 0.99);
