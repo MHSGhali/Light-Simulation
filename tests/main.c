@@ -11,6 +11,7 @@ int main(void) {
     test_transport();
     test_bsdf();
     test_furnace();
+    test_ui();
     printf("\n-------------------------\n%d checks, %d failure%s\n",
            ls_test_count, ls_test_failures, ls_test_failures == 1 ? "" : "s");
     return ls_test_failures == 0 ? 0 : 1;

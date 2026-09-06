@@ -5,4 +5,5 @@ void test_spectral(void);
 void test_transport(void);
 void test_bsdf(void);
 void test_furnace(void);
+void test_ui(void);
 #endif
