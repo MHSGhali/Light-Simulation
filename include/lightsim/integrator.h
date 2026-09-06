@@ -36,4 +36,31 @@
 void ls_estimate_irradiance(const Scene *sc, vec3 p, vec3 n, int nsamples,
                             Rng *rng, SpectrumAcc *out, ls_real *a_row);
 
+/* Which sampling strategies the path tracer uses to find emitted light.
+ *
+ * NEE and BSDF are each independently unbiased, so rendering the same scene
+ * three ways and requiring agreement is what catches MIS bookkeeping errors --
+ * a wrong weight makes MIS disagree with two strategies that cannot both be
+ * wrong in the same direction. MIS should also show the lowest variance. */
+typedef enum {
+    LS_STRAT_BSDF = 1,   /* find emitters only by scattering into them   */
+    LS_STRAT_NEE  = 2,   /* find emitters only by explicit connection    */
+    LS_STRAT_MIS  = 3    /* both, combined with the power heuristic      */
+} LsStrategy;
+
+/* Power heuristic (beta = 2). Exposed so the tests can assert its partition
+ * of unity: mis_power2(a,b) + mis_power2(b,a) == 1. */
+static inline ls_real ls_mis_power2(ls_real pa, ls_real pb) {
+    ls_real a = pa * pa, b = pb * pb, d = a + b;
+    return d > 0.0 ? a / d : 0.0;
+}
+
+/* Estimate spectral radiance arriving along `ray`, in W/(m^2 sr nm).
+ *
+ * `a_row`, if non-NULL, receives per-source attribution: every contribution
+ * terminates at exactly one emitter, whether found by NEE or by scattering and
+ * whether after zero or twelve bounces, so one traversal fills every column. */
+void ls_trace_radiance(const Scene *sc, Ray ray, Rng *rng, int max_depth,
+                       LsStrategy strat, SpectrumAcc *out, ls_real *a_row);
+
 #endif /* LIGHTSIM_INTEGRATOR_H */

@@ -6,12 +6,21 @@
 
 #include "geom.h"
 #include "light.h"
+#include "bsdf.h"
 
 typedef struct {
-    Prim   *prims;
-    int     nprims;
-    Light  *lights;
-    int     nlights;
+    Bsdf     bsdf;
+    Spectrum le;        /* emitted radiance W/(m^2 sr nm); zero if not emissive */
+    bool     emissive;
+} Material;
+
+typedef struct {
+    Prim     *prims;
+    int       nprims;
+    Material *mats;
+    int       nmats;
+    Light    *lights;
+    int       nlights;
 } Scene;
 
 /* Nearest hit. Returns false if the ray escapes. */

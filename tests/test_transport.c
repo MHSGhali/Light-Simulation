@@ -72,7 +72,7 @@ void test_transport(void) {
     {
         Light l = ls_light_point(v3(0, 0, 0), 1.0, flat);
         ls_light_finalize(&l, 0);
-        Scene sc = { NULL, 0, &l, 1 };
+        Scene sc = { .lights = &l, .nlights = 1 };
 
         /* C1: isotropic intensity I = Phi / 4 pi. */
         CHECK_NEAR(ls_light_intensity(&l, v3(0, 0, 1)), 0.07957747154594767, 1e-12);
@@ -104,7 +104,7 @@ void test_transport(void) {
         /* C9: E = E_perp cos(theta), independent of distance. */
         Light d = ls_light_directional(v3(0, 0, -1), 2.5, flat);
         ls_light_finalize(&d, 0);
-        Scene sd = { NULL, 0, &d, 1 };
+        Scene sd = { .lights = &d, .nlights = 1 };
         CHECK_NEAR(measure(&sd, v3(0, 0, 0), v3(0, 0, 1), 1, &rng), 2.5, E_TOL);
         CHECK_NEAR(measure(&sd, v3(0, 0, 500), v3(0, 0, 1), 1, &rng), 2.5, E_TOL);
         double th = 60.0 * LS_PI / 180.0;
@@ -117,7 +117,7 @@ void test_transport(void) {
         double alpha = 30.0 * LS_PI / 180.0;
         Light s = ls_light_spot(v3(0, 0, 0), v3(0, 0, -1), alpha, alpha, 1.0, flat);
         ls_light_finalize(&s, 0);
-        Scene ss = { NULL, 0, &s, 1 };
+        Scene ss = { .lights = &s, .nlights = 1 };
         CHECK_NEAR(s.omega_eff, 0.8417872144769325, 1e-12);
         CHECK_NEAR(ls_light_intensity(&s, v3(0, 0, -1)), 1.187948667789374, 1e-12);
         CHECK_NEAR(ls_light_emitted_flux(&s), 1.0, 1e-12);
@@ -147,7 +147,7 @@ void test_transport(void) {
         ls_light_finalize(&dk, 0);
         CHECK_NEAR(dk.radiance, 1.0, 1e-12);
         CHECK_NEAR(ls_light_emitted_flux(&dk), phi_disk, 1e-12);
-        Scene sdk = { NULL, 0, &dk, 1 };
+        Scene sdk = { .lights = &dk, .nlights = 1 };
         CHECK_NEAR(measure(&sdk, v3(0, 0, -2), v3(0, 0, 1), NS, &rng),
                    0.18479956785822313, 5e-3);
 
@@ -157,7 +157,7 @@ void test_transport(void) {
         Light sp = ls_light_sphere(v3(0, 0, 0), 0.25, phi_sph, flat);
         ls_light_finalize(&sp, 0);
         CHECK_NEAR(sp.radiance, 1.0, 1e-12);
-        Scene ssp = { NULL, 0, &sp, 1 };
+        Scene ssp = { .lights = &sp, .nlights = 1 };
         double e_sphere = measure(&ssp, v3(0, 0, -3), v3(0, 0, 1), NS, &rng);
         CHECK_NEAR(e_sphere, 0.02181661564992912, 5e-3);
 
@@ -169,7 +169,7 @@ void test_transport(void) {
          * breaks the agreement. */
         Light pt = ls_light_point(v3(0, 0, 0), phi_sph, flat);
         ls_light_finalize(&pt, 0);
-        Scene spt = { NULL, 0, &pt, 1 };
+        Scene spt = { .lights = &pt, .nlights = 1 };
         double e_point = measure(&spt, v3(0, 0, -3), v3(0, 0, 1), 1, &rng);
         CHECK_NEAR(e_point, 0.02181661564992912, E_TOL);
         CHECK_NEAR(e_sphere, e_point, 5e-3);
@@ -185,7 +185,7 @@ void test_transport(void) {
         CHECK_NEAR(rc.area, 2.0, 1e-12);
         CHECK_NEAR(rc.radiance, 1.0, 1e-12);
         CHECK_NEAR(rc.n.z, -1.0, 1e-12);           /* faces the probe */
-        Scene src = { NULL, 0, &rc, 1 };
+        Scene src = { .lights = &rc, .nlights = 1 };
         CHECK_NEAR(measure(&src, v3(0, 0, -1.5), v3(0, 0, 1), NS, &rng),
                    0.6568166565040201, 5e-3);
     }
@@ -206,12 +206,12 @@ void test_transport(void) {
         blocker.mat_id = 0;
         blocker.light_id = -1;
 
-        Scene sc = { &blocker, 1, &l, 1 };
+        Scene sc = { .prims = &blocker, .nprims = 1, .lights = &l, .nlights = 1 };
         CHECK_NEAR(measure(&sc, v3(0, 0, -2), v3(0, 0, 1), 1, &rng), 0.0, 1e-15);
 
         /* Step the probe out from behind the blocker and the full unoccluded
          * value returns -- proving the blocker is finite, not a global switch. */
-        Scene open_sc = { NULL, 0, &l, 1 };
+        Scene open_sc = { .lights = &l, .nlights = 1 };
         double want = measure(&open_sc, v3(20, 0, -2), v3(0, 0, 1), 1, &rng);
         CHECK_NEAR(measure(&sc, v3(20, 0, -2), v3(0, 0, 1), 1, &rng), want, E_TOL);
         CHECK(want > 0.0);
@@ -221,7 +221,7 @@ void test_transport(void) {
         double phi_disk = 2.4674011002723395;
         Light dk = ls_light_disk(v3(0, 0, 0), v3(0, 0, -1), 0.5, phi_disk, flat);
         ls_light_finalize(&dk, 0);
-        Scene open_dk = { NULL, 0, &dk, 1 };
+        Scene open_dk = { .lights = &dk, .nlights = 1 };
         double full = measure(&open_dk, v3(0, 0, -2), v3(0, 0, 1), 200000, &rng);
 
         Prim half;
@@ -232,7 +232,7 @@ void test_transport(void) {
         half.ex = v3(0.5, 0, 0);
         half.ey = v3(0, 5, 0);
         half.light_id = -1;
-        Scene half_sc = { &half, 1, &dk, 1 };
+        Scene half_sc = { .prims = &half, .nprims = 1, .lights = &dk, .nlights = 1 };
         double halved = measure(&half_sc, v3(0, 0, -2), v3(0, 0, 1), 200000, &rng);
         CHECK_NEAR(halved, 0.5 * full, 1e-2);
         NOTE("half-occluded disk: %.6f vs half of %.6f = %.6f",

@@ -3,4 +3,6 @@
 #define LIGHTSIM_TESTS_H
 void test_spectral(void);
 void test_transport(void);
+void test_bsdf(void);
+void test_furnace(void);
 #endif
