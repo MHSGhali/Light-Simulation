@@ -63,4 +63,29 @@ static inline ls_real ls_mis_power2(ls_real pa, ls_real pb) {
 void ls_trace_radiance(const Scene *sc, Ray ray, Rng *rng, int max_depth,
                        LsStrategy strat, SpectrumAcc *out, ls_real *a_row);
 
+/* As above, but emitted radiance is ignored at path vertices shallower than
+ * `skip_emission_before`. Used by the probe estimator: direct light is already
+ * counted by explicit light sampling at the probe, so collecting emission at
+ * the first hit as well would double count it. */
+void ls_trace_radiance_ex(const Scene *sc, Ray ray, Rng *rng, int max_depth,
+                          LsStrategy strat, int skip_emission_before,
+                          SpectrumAcc *out, ls_real *a_row);
+
+/* Full spectral irradiance at `p` on a surface with normal `n`, INCLUDING
+ * interreflection -- the quantity the analytic cos(theta)/r^2 model cannot
+ * produce.
+ *
+ *   E = E_direct + E_indirect
+ *
+ * E_direct comes from explicit light sampling with visibility (so it accounts
+ * for shadowing). E_indirect cosine-samples the hemisphere and traces:
+ * with pdf = cos/pi the cosine cancels and the estimator is (pi/N) sum L_i,
+ * with first-hit emission suppressed so the two halves do not overlap.
+ *
+ * `a_row`, if non-NULL, receives each source's own contribution. */
+void ls_estimate_irradiance_full(const Scene *sc, vec3 p, vec3 n,
+                                 int direct_samples, int indirect_samples,
+                                 int max_depth, Rng *rng,
+                                 SpectrumAcc *out, ls_real *a_row);
+
 #endif /* LIGHTSIM_INTEGRATOR_H */

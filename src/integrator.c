@@ -1,4 +1,5 @@
 #include "lightsim/integrator.h"
+#include <stdlib.h>
 
 static bool light_is_delta(const Light *l) {
     return l->kind == LS_LIGHT_POINT
@@ -60,6 +61,12 @@ static void deposit(SpectrumAcc *out, ls_real *a_row, const Spectrum *beta,
 
 void ls_trace_radiance(const Scene *sc, Ray ray, Rng *rng, int max_depth,
                        LsStrategy strat, SpectrumAcc *out, ls_real *a_row) {
+    ls_trace_radiance_ex(sc, ray, rng, max_depth, strat, 0, out, a_row);
+}
+
+void ls_trace_radiance_ex(const Scene *sc, Ray ray, Rng *rng, int max_depth,
+                          LsStrategy strat, int skip_emission_before,
+                          SpectrumAcc *out, ls_real *a_row) {
     *out = ls_acc_zero();
     if (a_row)
         for (int i = 0; i < sc->nlights; ++i) a_row[i] = 0.0;
@@ -82,7 +89,7 @@ void ls_trace_radiance(const Scene *sc, Ray ray, Rng *rng, int max_depth,
         vec3 ns = h.backface ? v3neg(h.ng) : h.ng;
 
         /* ---- emitted radiance found by scattering ---- */
-        if (m->emissive && use_bsdf) {
+        if (m->emissive && use_bsdf && depth >= skip_emission_before) {
             ls_real w = 1.0;
             if (!prev_delta && h.light_id >= 0 && (strat & LS_STRAT_NEE)) {
                 /* This emitter is also sampleable, so weight against NEE. */
@@ -154,4 +161,48 @@ void ls_trace_radiance(const Scene *sc, Ray ray, Rng *rng, int max_depth,
             beta = ls_spectrum_scale(beta, 1.0 / q);
         }
     }
+}
+
+
+void ls_estimate_irradiance_full(const Scene *sc, vec3 p, vec3 n,
+                                 int direct_samples, int indirect_samples,
+                                 int max_depth, Rng *rng,
+                                 SpectrumAcc *out, ls_real *a_row) {
+    /* Direct: explicit light sampling with visibility. */
+    ls_estimate_irradiance(sc, p, n, direct_samples, rng, out, a_row);
+    if (indirect_samples <= 0 || max_depth <= 0) return;
+
+    /* Indirect: cosine-sample the hemisphere. With pdf = cos/pi the cosine in
+     * the irradiance integral cancels exactly, leaving E = (pi/N) sum L_i. */
+    Basis fr = ls_basis(n);
+    SpectrumAcc ind = ls_acc_zero();
+    ls_real *row = NULL;
+    if (a_row) {
+        row = calloc((size_t)sc->nlights, sizeof *row);
+        if (!row) return;
+    }
+
+    for (int k = 0; k < indirect_samples; ++k) {
+        vec3 wl = ls_sample_hemisphere_cosine(ls_rng_f(rng), ls_rng_f(rng));
+        if (wl.z <= 0.0) continue;
+        vec3 wi = ls_basis_to_world(fr, wl);
+
+        Ray r;
+        r.o = ls_offset_origin(p, n, wi);
+        r.d = wi;
+        r.tmin = 0.0;
+        r.tmax = HUGE_VAL;
+
+        SpectrumAcc L;
+        /* skip_emission_before = 1: the first hit's emission is direct light,
+         * already counted above. Everything deeper is genuine indirect. */
+        ls_trace_radiance_ex(sc, r, rng, max_depth, LS_STRAT_MIS, 1, &L, row);
+        for (int b = 0; b < LS_NBINS; ++b) ind.v[b] += L.v[b];
+        if (a_row && row)
+            for (int i = 0; i < sc->nlights; ++i) a_row[i] += row[i] * LS_PI / (ls_real)indirect_samples;
+    }
+
+    ls_real w = LS_PI / (ls_real)indirect_samples;
+    for (int b = 0; b < LS_NBINS; ++b) out->v[b] += ind.v[b] * w;
+    free(row);
 }
