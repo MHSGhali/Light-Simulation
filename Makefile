@@ -41,7 +41,7 @@ TESTOBJ := $(patsubst tests/%.c,$(BUILD)/tests_%.o,$(TESTSRC))
 APPSRC  := $(wildcard apps/*.c)
 APPOBJ  := $(patsubst apps/%.c,$(BUILD)/apps_%.o,$(APPSRC))
 
-.PHONY: all test debug clean test-asan test-ubsan check-purity
+.PHONY: all test debug clean test-asan test-ubsan check-purity view
 
 all: lightsim
 
@@ -60,8 +60,33 @@ $(BUILD)/apps_%.o: apps/%.c | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/run_tests: $(OBJ) $(TESTOBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(LDLIBS)
+# ---- interactive viewer (optional: needs SDL2) ----------------------------
+# Kept out of `all` and out of $(SRC) so the library, the CLI and the tests all
+# build with no SDL2 installed.
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
+SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
+VIEWSRC    := $(wildcard viewer/*.c)
+VIEWOBJ    := $(patsubst viewer/%.c,$(BUILD)/viewer_%.o,$(VIEWSRC))
+
+$(BUILD)/viewer_%.o: viewer/%.c | $(BUILD)
+	$(CC) $(CFLAGS) -Iviewer $(SDL_CFLAGS) -c -o $@ $<
+
+view: lightsim-view
+
+lightsim-view: $(OBJ) $(VIEWOBJ)
+ifeq ($(strip $(SDL_LIBS)),)
+	@echo "lightsim-view needs SDL2. Install it with:  brew install sdl2"
+	@exit 1
+else
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(VIEWOBJ) $(SDL_LIBS) $(LDLIBS)
+endif
+
+# ui.c and font.c carry no SDL dependency, so the headless suite can exercise
+# the toolbar rules and glyph coverage without a window.
+HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o
+
+$(BUILD)/run_tests: $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW) $(LDLIBS)
 
 test: check-purity $(BUILD)/run_tests
 	$(BUILD)/run_tests
@@ -89,4 +114,4 @@ check-purity:
 	@echo "check-purity: transport core is free of photometric constants"
 
 clean:
-	rm -rf build lightsim run_tests
+	rm -rf build lightsim lightsim-view run_tests

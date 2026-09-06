@@ -10,6 +10,7 @@
 #include "lightsim/film.h"
 #include "lightsim/units.h"
 #include "lightsim/thread.h"
+#include "lightsim/export.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +21,7 @@ static void usage(const char *prog) {
     printf("usage:\n");
     printf("  %s source <model> [args] [--units radiometric|photometric]\n", prog);
     printf("  %s grid   <scene.txt> [--out PREFIX] [--units U] [--spp N]\n", prog);
-    printf("           [--indirect N] [--depth N]\n");
+    printf("           [--indirect N] [--depth N] [--threads N] [--blender FILE.py]\n");
     printf("  %s render <scene.txt> [--out FILE.ppm] [--spp N] [--depth N]\n\n", prog);
     printf("source models:\n");
     printf("  blackbody <T_K>                 Planckian radiator\n");
@@ -34,10 +35,11 @@ typedef struct {
     LsUnitSystem units;
     const char  *out;
     int spp, indirect, depth, threads;
+    const char *blender;
 } Opts;
 
 static Opts parse_opts(int argc, char **argv, int from, const char *def_out) {
-    Opts o = { LS_UNITS_PHOTOMETRIC, def_out, 256, 64, 4, 0 };
+    Opts o = { LS_UNITS_PHOTOMETRIC, def_out, 256, 64, 4, 0, NULL };
     for (int i = from; i < argc; ++i) {
         if (!strcmp(argv[i], "--units") && i + 1 < argc) {
             ++i;
@@ -48,6 +50,7 @@ static Opts parse_opts(int argc, char **argv, int from, const char *def_out) {
         else if   (!strcmp(argv[i], "--indirect") && i + 1 < argc) o.indirect = atoi(argv[++i]);
         else if   (!strcmp(argv[i], "--depth")    && i + 1 < argc) o.depth = atoi(argv[++i]);
         else if   (!strcmp(argv[i], "--threads")  && i + 1 < argc) o.threads = atoi(argv[++i]);
+        else if   (!strcmp(argv[i], "--blender")  && i + 1 < argc) o.blender = argv[++i];
     }
     return o;
 }
@@ -229,6 +232,15 @@ static int cmd_grid(int argc, char **argv) {
         fprintf(f, "]\n}\n");
         fclose(f);
         printf("wrote %s\n", path);
+    }
+
+    if (o.blender) {
+        if (ls_export_blender(&d, val, nu, nv, st.min, st.max, uname,
+                              o.units == LS_UNITS_PHOTOMETRIC ? "illuminance" : "irradiance",
+                              o.blender))
+            printf("wrote %s  (open in Blender: Scripting > Open > Run)\n", o.blender);
+        else
+            fprintf(stderr, "could not write %s\n", o.blender);
     }
 
     free(val); free(rad);
