@@ -54,27 +54,27 @@ test: check-purity run_tests
 # colorimetry/units layer. If it shows up in the transport core, a lumen can
 # reach an accumulator that is later scaled by a radiometric BSDF.
 PURE_SRC := $(filter-out src/units.c src/color.c src/cie_data.c src/spectrum.c,$(SRC))
+# Word-anchored so "flux" does not match "lux".
+PURE_PAT := \b683\b|ybar|ls_photometric|\blux\b|\bcandela\b|\blumens?\b
 check-purity:
-	@if [ -n "$(PURE_SRC)" ] && \
-	    grep -n -e '\b683\b' -e 'ybar' -e 'photometric' -e 'lux' -e 'candela' \
-	         $(PURE_SRC) 2>/dev/null; then \
+	@if [ -n "$(PURE_SRC)" ] && grep -nE '$(PURE_PAT)' $(PURE_SRC) 2>/dev/null; then \
 	    echo "FAIL: photometry leaked out of the units layer (above)"; exit 1; \
 	fi
 	@echo "check-purity: transport core is free of photometric constants"
 
-
-
 debug: CFLAGS := $(CSTD) $(WARN) -O0 -g3 -Iinclude
 debug: clean lightsim
 
-# Sanitizers rebuild from scratch at -O1 so the traps are meaningful.
+# Sanitizers rebuild from scratch at -O1 so the traps are meaningful, and with
+# -ffp-contract=off so the deterministic tolerances stay reproducible.
+SAN_OPT := -O1 -g -ffp-contract=off -fno-fast-math -fno-omit-frame-pointer
 test-asan:
 	$(MAKE) clean
-	$(MAKE) OPT="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" test
+	$(MAKE) OPT="$(SAN_OPT) -fsanitize=address,undefined -fno-sanitize-recover=all" test
 
 test-ubsan:
 	$(MAKE) clean
-	$(MAKE) OPT="-O1 -g -fsanitize=undefined -fno-sanitize-recover=all" test
+	$(MAKE) OPT="$(SAN_OPT) -fsanitize=undefined -fno-sanitize-recover=all" test
 
 clean:
 	rm -rf $(BUILD) lightsim run_tests

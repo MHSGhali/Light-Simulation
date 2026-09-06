@@ -81,8 +81,19 @@ void test_spectral(void) {
         CHECK_NEAR(ls_cmf_ybar_integral(), 106.857, 1e-4);
         NOTE("integral of V(lambda) d(lambda) = %.4f nm", ybar_int);
 
-        /* Equal-energy illuminant E: LER = Km * int(ybar) / band width. */
-        CHECK_NEAR(ls_luminous_efficacy_band(&unity), 153.649, 1e-4);
+        /* Equal-energy illuminant E: LER = Km * int(ybar) / band width.
+         * Asserted as an identity (which checks that the efficacy function
+         * composes correctly at any resolution) and, at the reference 5 nm
+         * grid, against the literal value. The band width is NBINS*step, so
+         * the literal shifts to 152.06 at 10 nm -- it is a property of the
+         * quadrature grid, not a physical constant. */
+        double band_nm = (double)LS_NBINS * LS_SPECTRAL_STEP;
+        CHECK_NEAR(ls_luminous_efficacy_band(&unity),
+                   LS_KM_LM_PER_W * ybar_int / band_nm, 1e-6);
+        if (LS_SPECTRAL_STEP_NM == 5)
+            CHECK_NEAR(ls_luminous_efficacy_band(&unity), 153.649, 1e-4);
+        NOTE("illuminant E LER = %.3f lm/W over a %.0f nm band",
+             ls_luminous_efficacy_band(&unity), band_nm);
 
         /* Far red carries power but almost no luminous flux. */
         Spectrum ir = ls_spectrum_monochromatic(800.0, 1.0);
