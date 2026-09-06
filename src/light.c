@@ -152,6 +152,39 @@ ls_real ls_light_intensity(const Light *l, vec3 w) {
     return 0.0;
 }
 
+ls_real ls_light_pdf_w(const Light *l, vec3 ref, vec3 y, vec3 ny) {
+    switch (l->kind) {
+        case LS_LIGHT_POINT:
+        case LS_LIGHT_SPOT:
+        case LS_LIGHT_DIRECTIONAL:
+            return 0.0;                       /* delta: unreachable by sampling */
+        case LS_LIGHT_SPHERE:
+        case LS_LIGHT_DISK:
+        case LS_LIGHT_RECT: {
+            vec3 d = v3sub(y, ref);
+            ls_real d2 = v3len2(d);
+            if (d2 <= 0.0 || l->area <= 0.0) return 0.0;
+            vec3 wi = v3scale(d, 1.0 / sqrt(d2));
+            ls_real cos_y = v3dot(ny, v3neg(wi));
+            if (cos_y <= 0.0) return 0.0;
+            return ls_pdf_area_to_solid_angle(1.0 / l->area, d2, cos_y);
+        }
+    }
+    return 0.0;
+}
+
+Spectrum ls_light_radiance(const Light *l, vec3 ny, vec3 w) {
+    switch (l->kind) {
+        case LS_LIGHT_SPHERE:
+        case LS_LIGHT_DISK:
+        case LS_LIGHT_RECT:
+            if (v3dot(ny, w) <= 0.0) return ls_spectrum_zero();   /* one-sided */
+            return ls_spectrum_scale(l->s_hat, l->radiance);
+        default:
+            return ls_spectrum_zero();        /* delta lights have no radiance */
+    }
+}
+
 bool ls_light_sample(const Light *l, vec3 p, ls_real u1, ls_real u2, LightSample *s) {
     s->light_index = l->index;
 

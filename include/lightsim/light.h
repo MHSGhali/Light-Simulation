@@ -92,4 +92,13 @@ ls_real ls_light_intensity(const Light *l, vec3 w);
  * contribute (back face, degenerate geometry, outside a spot cone). */
 bool ls_light_sample(const Light *l, vec3 p, ls_real u1, ls_real u2, LightSample *s);
 
+/* Solid-angle pdf of having sampled the point `y` (with normal `ny`) on this
+ * light from `ref`. Needed for the MIS weight applied to emission found by BSDF
+ * sampling. Returns 0 for delta lights, which BSDF sampling can never hit. */
+ls_real ls_light_pdf_w(const Light *l, vec3 ref, vec3 y, vec3 ny);
+
+/* Emitted spectral radiance leaving this light in direction `w` (unit, away
+ * from the surface with normal `ny`). Zero behind a one-sided emitter. */
+Spectrum ls_light_radiance(const Light *l, vec3 ny, vec3 w);
+
 #endif /* LIGHTSIM_LIGHT_H */

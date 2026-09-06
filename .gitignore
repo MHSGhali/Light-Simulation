@@ -63,3 +63,5 @@ dkms.conf
 # Reference papers: 75 MB of PDFs, two of them unrelated textbooks. Kept out of
 # git history deliberately -- drop this line if they should be tracked.
 /papers/
+
+/build/

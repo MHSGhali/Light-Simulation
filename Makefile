@@ -5,22 +5,39 @@ CC      := cc
 CSTD    := -std=c11 -D_DEFAULT_SOURCE
 WARN    := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wdouble-promotion \
            -Wstrict-prototypes -Wmissing-prototypes
+
 # -ffp-contract=off keeps FMA contraction from shifting results at the 1e-9
 # level, which would make the deterministic tests flaky across -O levels.
-# -fno-fast-math is a policy, not a preference: fast-math licenses reassociation
-# of the spectral sums and disables the NaN/Inf semantics the estimators rely on
-# to fail loudly rather than quietly.
-OPT     := -O3 -ffp-contract=off -fno-fast-math
-CFLAGS  := $(CSTD) $(WARN) $(OPT) -Iinclude
+# -fno-fast-math is policy, not preference: fast-math would license
+# reassociation of the spectral sums and disable the NaN/Inf semantics the
+# estimators rely on to fail loudly.
+FPFLAGS := -ffp-contract=off -fno-fast-math
+
+# Each configuration builds into its own directory. Sharing one caused
+# sanitizer-instrumented objects to be linked into a plain build.
+VARIANT ?= release
+ifeq ($(VARIANT),release)
+  OPT  := -O2 $(FPFLAGS)
+  SAN  :=
+else ifeq ($(VARIANT),debug)
+  OPT  := -O0 -g3 $(FPFLAGS)
+  SAN  :=
+else ifeq ($(VARIANT),asan)
+  OPT  := -O1 -g -fno-omit-frame-pointer $(FPFLAGS)
+  SAN  := -fsanitize=address,undefined -fno-sanitize-recover=all
+else ifeq ($(VARIANT),ubsan)
+  OPT  := -O1 -g -fno-omit-frame-pointer $(FPFLAGS)
+  SAN  := -fsanitize=undefined -fno-sanitize-recover=all
+endif
+
+CFLAGS  := $(CSTD) $(WARN) $(OPT) $(SAN) -Iinclude
 LDLIBS  := -lm -lpthread
 
-BUILD   := build
+BUILD   := build/$(VARIANT)
 SRC     := $(wildcard src/*.c)
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
-
 TESTSRC := $(wildcard tests/*.c)
 TESTOBJ := $(patsubst tests/%.c,$(BUILD)/tests_%.o,$(TESTSRC))
-
 APPSRC  := $(wildcard apps/*.c)
 APPOBJ  := $(patsubst apps/%.c,$(BUILD)/apps_%.o,$(APPSRC))
 
@@ -43,16 +60,25 @@ $(BUILD)/apps_%.o: apps/%.c | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-run_tests: $(OBJ) $(TESTOBJ)
+$(BUILD)/run_tests: $(OBJ) $(TESTOBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(LDLIBS)
 
-test: check-purity run_tests
-	./run_tests
+test: check-purity $(BUILD)/run_tests
+	$(BUILD)/run_tests
+
+debug:
+	$(MAKE) VARIANT=debug all
+
+test-asan:
+	$(MAKE) VARIANT=asan test
+
+test-ubsan:
+	$(MAKE) VARIANT=ubsan test
 
 # The units invariant from the design, enforced by the build rather than by
 # discipline: photometry (Km, V(lambda), lux, candela) may appear ONLY in the
-# colorimetry/units layer. If it shows up in the transport core, a lumen can
-# reach an accumulator that is later scaled by a radiometric BSDF.
+# colorimetry/units layer. If it reaches the transport core, a lumen can land in
+# an accumulator that is later scaled by a radiometric BSDF.
 PURE_SRC := $(filter-out src/units.c src/color.c src/cie_data.c src/spectrum.c,$(SRC))
 # Word-anchored so "flux" does not match "lux".
 PURE_PAT := \b683\b|ybar|ls_photometric|\blux\b|\bcandela\b|\blumens?\b
@@ -62,19 +88,5 @@ check-purity:
 	fi
 	@echo "check-purity: transport core is free of photometric constants"
 
-debug: CFLAGS := $(CSTD) $(WARN) -O0 -g3 -Iinclude
-debug: clean lightsim
-
-# Sanitizers rebuild from scratch at -O1 so the traps are meaningful, and with
-# -ffp-contract=off so the deterministic tolerances stay reproducible.
-SAN_OPT := -O1 -g -ffp-contract=off -fno-fast-math -fno-omit-frame-pointer
-test-asan:
-	$(MAKE) clean
-	$(MAKE) OPT="$(SAN_OPT) -fsanitize=address,undefined -fno-sanitize-recover=all" test
-
-test-ubsan:
-	$(MAKE) clean
-	$(MAKE) OPT="$(SAN_OPT) -fsanitize=undefined -fno-sanitize-recover=all" test
-
 clean:
-	rm -rf $(BUILD) lightsim run_tests
+	rm -rf build lightsim run_tests
