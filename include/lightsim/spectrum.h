@@ -49,6 +49,11 @@
 
 typedef struct { float v[LS_NBINS]; } Spectrum;
 
+/* Accumulator for Monte Carlo sums. double, because float loses ~3 significant
+ * digits over 1e8 samples. Spectrum stays float: it is the type that travels
+ * through the inner loop, where footprint matters. */
+typedef struct { double v[LS_NBINS]; } SpectrumAcc;
+
 /* Centre wavelength of bin i, in nanometres. */
 static inline ls_real ls_bin_lambda(int i) {
     return LS_LAMBDA_MIN + (ls_real)i * LS_SPECTRAL_STEP;
@@ -90,6 +95,11 @@ ls_real  ls_spectrum_mean(const Spectrum *a);
 ls_real ls_spectrum_integrate(const Spectrum *a);
 /* Integral of a against a per-bin weight table (e.g. the CIE ybar / V(lambda)). */
 ls_real ls_spectrum_integrate_weighted(const Spectrum *a, const float *weight);
+
+/* ---- accumulators ---- */
+SpectrumAcc ls_acc_zero(void);
+void        ls_acc_add_scaled(SpectrumAcc *acc, const Spectrum *s, ls_real w);
+Spectrum    ls_acc_mean(const SpectrumAcc *acc, uint64_t n);
 
 /* Rescale so that the band integral equals `target`. No-op on a black spectrum. */
 Spectrum ls_spectrum_normalize_to(Spectrum a, ls_real target);
