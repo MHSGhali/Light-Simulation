@@ -19,6 +19,12 @@ ls_real ls_luminous_efficacy_total(const Spectrum *s, ls_real total_radiant_powe
     return total_radiant_power > 0.0 ? ls_photometric(s) / total_radiant_power : 0.0;
 }
 
+ls_real ls_watts_from_lumens(ls_real lumens, const Spectrum *spd) {
+    Spectrum hat = ls_spectrum_normalize_to(*spd, 1.0);
+    ls_real lm_per_w = ls_photometric(&hat);
+    return lm_per_w > 0.0 ? lumens / lm_per_w : 0.0;
+}
+
 ls_real ls_quantity_value(const Spectrum *s, LsUnitSystem sys) {
     return sys == LS_UNITS_PHOTOMETRIC ? ls_photometric(s) : ls_radiometric(s);
 }

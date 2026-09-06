@@ -47,6 +47,11 @@ ls_real ls_luminous_efficacy_band(const Spectrum *s);
  * spectrum's band integral). */
 ls_real ls_luminous_efficacy_total(const Spectrum *s, ls_real total_radiant_power);
 
+/* Radiant flux (W) equivalent to a luminous flux (lm) for a given spectral
+ * shape. This is the one place a lumen enters the system; callers convert here
+ * and hand watts to the light constructors, so no lumen is ever stored. */
+ls_real ls_watts_from_lumens(ls_real lumens, const Spectrum *spd);
+
 /* Report a quantity in the requested system. */
 ls_real     ls_quantity_value(const Spectrum *s, LsUnitSystem sys);
 const char *ls_quantity_unit(LsQuantity q, LsUnitSystem sys);
