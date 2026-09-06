@@ -1,0 +1,6 @@
+/* tests.h — entry points for each validation translation unit. */
+#ifndef LIGHTSIM_TESTS_H
+#define LIGHTSIM_TESTS_H
+void test_spectral(void);
+void test_transport(void);
+#endif
