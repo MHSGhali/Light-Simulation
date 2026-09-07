@@ -50,6 +50,15 @@ void ls_scene_update_light(SceneDesc *d, int index);
 /* Duplicate a light, offset by `offset`. Returns the new index, or -1. */
 int  ls_scene_duplicate_light(SceneDesc *d, int index, vec3 offset);
 
+/* Rotate an object about `axis` (unit) through `angle` radians, about its own
+ * centre. Only orientation changes -- position is untouched.
+ *
+ * A point or sphere source has no orientation, so rotating it is a no-op rather
+ * than an error; the caller is free to offer the handle and let it do nothing
+ * visible. Returns true if anything actually turned. */
+bool ls_scene_rotate_light(SceneDesc *d, int index, vec3 axis, ls_real angle);
+bool ls_scene_rotate_prim(SceneDesc *d, int index, vec3 axis, ls_real angle);
+
 int  ls_scene_add_material(SceneDesc *d, Material m, const char *name);
 int  ls_scene_add_prim(SceneDesc *d, Prim p);
 void ls_scene_remove_prim(SceneDesc *d, int index);

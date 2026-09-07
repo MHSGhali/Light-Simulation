@@ -37,6 +37,16 @@
 #define CBAR_H 14
 #define LS_UNDO_MAX 32
 #define ROW_H 17
+#define GIZMO_PX 72.0            /* on-screen size of the gizmo, window pixels */
+#define GIZMO_HIT 11             /* handle pick tolerance, window pixels */
+
+/* Handles, in pick priority order: the translate axes sit inside the rotation
+ * rings, so testing them first makes the inner handle win where they cross. */
+typedef enum {
+    GZ_NONE = 0,
+    GZ_MOVE_X, GZ_MOVE_Y, GZ_MOVE_Z,
+    GZ_ROT_X,  GZ_ROT_Y,  GZ_ROT_Z
+} GizmoHandle;
 
 typedef struct {
     SceneDesc d;
@@ -75,6 +85,20 @@ typedef struct {
     /* Canvas rect of the 3D view, in window coordinates, so picking and the
      * overlay share one mapping with the blit. */
     int    view_x, view_y, view_w, view_h;
+    /* Canvas rect of the field map, likewise shared by its hover mapping. */
+    int    fmap_x, fmap_y, fmap_side;
+
+    /* Cached vertex buffer for the field drape, so a 64x64 grid does not
+     * allocate half a megabyte every frame. */
+    SDL_Vertex *drape;
+    int         drape_cap;
+    bool        show_drape;
+
+    /* ---- transform gizmo ---- */
+    int    gz_active;            /* GizmoHandle, or 0 for none */
+    int    gz_hover;
+    vec3   gz_origin;            /* object position when the drag began */
+    double gz_grab;              /* axis parameter, or ring angle, at grab */
 
     /* ---- editing ---- */
     LsTier tier;
@@ -245,7 +269,6 @@ static void *render_thread(void *arg) {
             continue;
         }
         atomic_store(&a->acked, false);
-        if (a->st.grid_mode) { SDL_Delay(40); continue; }
         if (atomic_exchange(&a->restart, 0)) {
             size_t np = (size_t)a->film.width * (size_t)a->film.height;
             memset(a->film.pix, 0, np * sizeof *a->film.pix);
@@ -479,13 +502,266 @@ static void draw_overlay(SDL_Renderer *ren, const App *a, const Camera *cam) {
     }
 }
 
-/* ---------------------------------------------------------- inspector ---- */
-
-/* Defined with the editing helpers below; the inspector commits through them. */
+/* Defined with the editing helpers below; the gizmo and inspector commit
+ * through them. */
 static void scene_pause(App *a);
 static void scene_resume(App *a);
 static void solve_and_refresh(App *a);
 static void discard_last_undo(App *a);
+
+/* Draw the measured field where it was actually measured: one coloured quad per
+ * measurement point, laid on the grid plane in the 3D view. This is the same
+ * data and the same viridis ramp as the field map beside it, so the two panes
+ * are visibly one result rather than two pictures.
+ *
+ * Semi-transparent, so the path-traced geometry stays readable underneath and
+ * it reads as a measurement laid over the scene rather than as paint. */
+static void draw_field_drape(SDL_Renderer *ren, App *a, const Camera *cam) {
+    if (!a->d.has_grid || a->nu <= 0 || a->nv <= 0 || !a->disp) return;
+
+    /* Cap the drawn resolution: past a certain density the cells are smaller
+     * than a pixel and the triangles are wasted work. */
+    int step = 1;
+    while ((a->nu / step) * (a->nv / step) > 4096) step++;
+    int nu = a->nu / step, nv = a->nv / step;
+    if (nu < 1 || nv < 1) return;
+
+    int need = nu * nv * 6;
+    if (need > a->drape_cap) {
+        SDL_Vertex *nv2 = realloc(a->drape, (size_t)need * sizeof *nv2);
+        if (!nv2) return;
+        a->drape = nv2;
+        a->drape_cap = need;
+    }
+
+    double span = (a->hi > a->lo) ? (a->hi - a->lo) : 1.0;
+    int n = 0;
+    for (int j = 0; j < nv; ++j) {
+        for (int i = 0; i < nu; ++i) {
+            double u0 = (double)(i * step) / a->nu, u1 = (double)((i + 1) * step) / a->nu;
+            double v0 = (double)(j * step) / a->nv, v1 = (double)((j + 1) * step) / a->nv;
+            vec3 c[4] = {
+                v3add(a->d.grid_o, v3add(v3scale(a->d.grid_u, u0), v3scale(a->d.grid_v, v0))),
+                v3add(a->d.grid_o, v3add(v3scale(a->d.grid_u, u1), v3scale(a->d.grid_v, v0))),
+                v3add(a->d.grid_o, v3add(v3scale(a->d.grid_u, u1), v3scale(a->d.grid_v, v1))),
+                v3add(a->d.grid_o, v3add(v3scale(a->d.grid_u, u0), v3scale(a->d.grid_v, v1)))
+            };
+            SDL_FPoint p[4];
+            bool ok = true;
+            for (int k = 0; k < 4; ++k) {
+                int sx, sy;
+                if (!project_view(a, cam, c[k], &sx, &sy)) { ok = false; break; }
+                p[k].x = (float)sx; p[k].y = (float)sy;
+            }
+            if (!ok) continue;
+
+            /* Sample the cell's value at its centre. */
+            int si = i * step + step / 2, sj = j * step + step / 2;
+            if (si >= a->nu) si = a->nu - 1;
+            if (sj >= a->nv) sj = a->nv - 1;
+            Uint8 r, g, b;
+            draw_viridis((a->disp[sj * a->nu + si] - a->lo) / span, &r, &g, &b);
+            SDL_Color col = { r, g, b, 205 };
+
+            const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+            for (int k = 0; k < 6; ++k) {
+                a->drape[n].position = p[tri[k]];
+                a->drape[n].color = col;
+                a->drape[n].tex_coord.x = 0.0f;
+                a->drape[n].tex_coord.y = 0.0f;
+                n++;
+            }
+        }
+    }
+    if (n > 0) SDL_RenderGeometry(ren, NULL, a->drape, n, NULL, 0);
+}
+
+/* -------------------------------------------------------------- gizmo ---- */
+
+static const vec3 GZ_AXIS[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+
+/* Centre of whatever is selected, or false if nothing is. */
+static bool gizmo_center(const App *a, vec3 *c) {
+    if (a->sel_light >= 0 && a->sel_light < a->d.nlights) { *c = a->d.lights[a->sel_light].p; return true; }
+    if (a->sel_prim  >= 0 && a->sel_prim  < a->d.nprims)  { *c = a->d.prims[a->sel_prim].c;   return true; }
+    return false;
+}
+
+/* World length that projects to GIZMO_PX window pixels at the gizmo's depth, so
+ * the handles stay the same size on screen however far away the object is. */
+static double gizmo_scale(const App *a, const Camera *cam, vec3 c) {
+    double z = v3dot(v3sub(c, cam->eye), cam->fwd);
+    if (z < 1e-4) z = 1e-4;
+    double px_film = GIZMO_PX * (double)cam->width / (double)(a->view_w > 0 ? a->view_w : 1);
+    return px_film * z * 2.0 * tan(0.5 * cam->fov_y) / (double)cam->height;
+}
+
+/* Distance in window pixels from (mx,my) to the projected segment ab. */
+static double seg_dist_px(const App *a, const Camera *cam, vec3 p0, vec3 p1,
+                          int mx, int my) {
+    int x0, y0, x1, y1;
+    if (!project_view(a, cam, p0, &x0, &y0)) return 1e9;
+    if (!project_view(a, cam, p1, &x1, &y1)) return 1e9;
+    double vx = x1 - x0, vy = y1 - y0;
+    double L2 = vx * vx + vy * vy;
+    double t = (L2 > 0.0) ? ((mx - x0) * vx + (my - y0) * vy) / L2 : 0.0;
+    t = ls_clamp(t, 0.0, 1.0);
+    double dx = mx - (x0 + t * vx), dy = my - (y0 + t * vy);
+    return sqrt(dx * dx + dy * dy);
+}
+
+static void ring_points(vec3 c, vec3 axis, double r, vec3 *out, int n) {
+    Basis b = ls_basis(axis);
+    for (int i = 0; i < n; ++i) {
+        double t = LS_TWO_PI * i / (double)n;
+        out[i] = v3add(c, v3add(v3scale(b.t, r * cos(t)), v3scale(b.b, r * sin(t))));
+    }
+}
+
+static int gizmo_pick(const App *a, const Camera *cam, int mx, int my) {
+    vec3 c;
+    if (!gizmo_center(a, &c)) return GZ_NONE;
+    double L = gizmo_scale(a, cam, c);
+    int best = GZ_NONE;
+    double best_d = (double)GIZMO_HIT;
+
+    for (int i = 0; i < 3; ++i) {
+        double d = seg_dist_px(a, cam, c, v3add(c, v3scale(GZ_AXIS[i], L)), mx, my);
+        if (d < best_d) { best_d = d; best = GZ_MOVE_X + i; }
+    }
+    /* Rings are only offered where rotating means something. */
+    bool rotatable = (a->sel_light >= 0)
+                   ? (a->d.lights[a->sel_light].kind != LS_LIGHT_POINT &&
+                      a->d.lights[a->sel_light].kind != LS_LIGHT_SPHERE)
+                   : (a->sel_prim >= 0 && a->d.prims[a->sel_prim].kind != LS_PRIM_SPHERE);
+    if (rotatable) {
+        vec3 pts[28];
+        for (int i = 0; i < 3; ++i) {
+            ring_points(c, GZ_AXIS[i], L * 0.92, pts, 28);
+            for (int k = 0; k < 28; ++k) {
+                double d = seg_dist_px(a, cam, pts[k], pts[(k + 1) % 28], mx, my);
+                if (d < best_d) { best_d = d; best = GZ_ROT_X + i; }
+            }
+        }
+    }
+    return best;
+}
+
+static void gizmo_draw(SDL_Renderer *ren, const App *a, const Camera *cam) {
+    vec3 c;
+    if (!gizmo_center(a, &c)) return;
+    double L = gizmo_scale(a, cam, c);
+    const Col axis_col[3] = { COL_AXIS_X, COL_AXIS_Y, COL_AXIS_Z };
+    const char *axis_name[3] = { "X", "Y", "Z" };
+
+    bool rotatable = (a->sel_light >= 0)
+                   ? (a->d.lights[a->sel_light].kind != LS_LIGHT_POINT &&
+                      a->d.lights[a->sel_light].kind != LS_LIGHT_SPHERE)
+                   : (a->sel_prim >= 0 && a->d.prims[a->sel_prim].kind != LS_PRIM_SPHERE);
+
+    if (rotatable) {
+        vec3 pts[28];
+        for (int i = 0; i < 3; ++i) {
+            bool hot = (a->gz_active == GZ_ROT_X + i) || (a->gz_hover == GZ_ROT_X + i);
+            ring_points(c, GZ_AXIS[i], L * 0.92, pts, 28);
+            overlay_loop(ren, a, cam, pts, 28, axis_col[i], hot ? 255 : 90);
+        }
+    }
+
+    int cx0, cy0;
+    if (!project_view(a, cam, c, &cx0, &cy0)) return;
+    for (int i = 0; i < 3; ++i) {
+        bool hot = (a->gz_active == GZ_MOVE_X + i) || (a->gz_hover == GZ_MOVE_X + i);
+        vec3 tip = v3add(c, v3scale(GZ_AXIS[i], L));
+        int tx, ty;
+        if (!project_view(a, cam, tip, &tx, &ty)) continue;
+        Uint8 al = hot ? 255 : 200;
+        draw_line(ren, cx0, cy0, tx, ty, axis_col[i], al);
+        /* A second line one pixel over reads as a thicker stroke without
+         * needing a polygon. */
+        draw_line(ren, cx0, cy0 + 1, tx, ty + 1, axis_col[i], al);
+        draw_marker(ren, tx, ty, hot ? 5 : 3, axis_col[i], al);
+        draw_text(ren, tx + 7, ty - 3, 1, axis_name[i], axis_col[i], al);
+    }
+}
+
+/* Move whatever is selected to `np`. A part that is an area light's own face
+ * moves the light, so the pairing cannot come apart. */
+static void move_selection(App *a, vec3 np) {
+    scene_pause(a);
+    if (a->sel_light >= 0) {
+        a->d.lights[a->sel_light].p = np;
+        ls_scene_update_light(&a->d, a->sel_light);
+    } else if (a->sel_prim >= 0) {
+        int lid = a->d.prims[a->sel_prim].light_id;
+        if (lid >= 0) {
+            a->d.lights[lid].p = np;
+            ls_scene_update_light(&a->d, lid);
+        } else {
+            a->d.prims[a->sel_prim].c = np;
+            ls_scene_rebuild(&a->d);
+        }
+    }
+    scene_resume(a);
+}
+
+static void gizmo_begin(App *a, const Camera *cam, int mx, int my, int handle) {
+    Ray r;
+    vec3 c;
+    if (!gizmo_center(a, &c) || !view_pick_ray(a, cam, mx, my, &r)) return;
+    a->gz_active = handle;
+    a->gz_origin = c;
+    a->gz_grab = 0.0;
+    if (handle <= GZ_MOVE_Z) {
+        vec3 ax = GZ_AXIS[handle - GZ_MOVE_X];
+        double t;
+        if (ls_line_closest_t(c, ax, r.o, r.d, &t)) a->gz_grab = t;
+    } else {
+        vec3 ax = GZ_AXIS[handle - GZ_ROT_X];
+        vec3 q;
+        if (ls_ray_plane(r.o, r.d, c, ax, &q)) {
+            Basis b = ls_basis(ax);
+            vec3 w = v3sub(q, c);
+            a->gz_grab = atan2(v3dot(w, b.b), v3dot(w, b.t));
+        }
+    }
+}
+
+static void gizmo_drag(App *a, const Camera *cam, int mx, int my) {
+    Ray r;
+    if (a->gz_active == GZ_NONE || !view_pick_ray(a, cam, mx, my, &r)) return;
+
+    if (a->gz_active <= GZ_MOVE_Z) {
+        /* Slide along the axis: the closest point on the axis line to the pick
+         * ray, minus where it was when the handle was grabbed. */
+        vec3 ax = GZ_AXIS[a->gz_active - GZ_MOVE_X];
+        double t;
+        if (!ls_line_closest_t(a->gz_origin, ax, r.o, r.d, &t)) return;
+        move_selection(a, v3add(a->gz_origin, v3scale(ax, t - a->gz_grab)));
+        return;
+    }
+
+    vec3 c;
+    if (!gizmo_center(a, &c)) return;
+    vec3 ax = GZ_AXIS[a->gz_active - GZ_ROT_X];
+    vec3 q;
+    if (!ls_ray_plane(r.o, r.d, c, ax, &q)) return;
+    Basis b = ls_basis(ax);
+    vec3 w = v3sub(q, c);
+    double ang = atan2(v3dot(w, b.b), v3dot(w, b.t));
+    double delta = ang - a->gz_grab;
+    /* Applied incrementally, so dragging past the wrap point keeps turning the
+     * same way instead of snapping back a full revolution. */
+    while (delta >  LS_PI) delta -= LS_TWO_PI;
+    while (delta < -LS_PI) delta += LS_TWO_PI;
+    scene_pause(a);
+    if (a->sel_light >= 0)     ls_scene_rotate_light(&a->d, a->sel_light, ax, delta);
+    else if (a->sel_prim >= 0) ls_scene_rotate_prim(&a->d, a->sel_prim, ax, delta);
+    scene_resume(a);
+    a->gz_grab = ang;
+}
+
+/* ---------------------------------------------------------- inspector ---- */
 
 #define INSP_TOP 212
 
@@ -810,6 +1086,7 @@ int main(int argc, char **argv) {
             printf("  2 3D render      P add part       ^Y redo    W save scene\n");
             printf("  3 tier           D duplicate      R re-solve B export Blender\n");
             printf("  U lux/watt       DEL delete       Q draft/fine\n");
+    printf("  F drape the measured field on the 3D geometry   TAB cycle selection\n");
             printf("  T full/direct    Esc cancel, then clear selection, then quit\n\n");
             printf("  Click to select. Drag the selection to move it, drag elsewhere\n");
             printf("  to orbit. In the inspector, drag a row to scrub or type a value.\n");
@@ -851,6 +1128,7 @@ int main(int argc, char **argv) {
     a.tier = LS_TIER_SIMPLE;
     a.tool = UI_TOOL_NONE;
     a.new_kind = LS_LIGHT_RECT;
+    a.show_drape = true;
 
     if (a.d.has_grid) {
         a.nu = a.d.grid_nu; a.nv = a.d.grid_nv;
@@ -864,6 +1142,10 @@ int main(int argc, char **argv) {
         refresh_display(&a);
         printf("  %.4g .. %.4g lx, mean %.4g\n", a.stats.min, a.stats.max, a.stats.mean);
     }
+
+    /* Open with the first light selected, so the inspector shows something to
+     * read and edit rather than an empty panel the user has to discover. */
+    if (a.d.nlights > 0) a.sel_light = 0;
 
     /* Orbit starts wherever the scene's own camera is pointing. */
     if (a.d.has_camera) {
@@ -961,6 +1243,27 @@ int main(int argc, char **argv) {
                     case SDLK_s: save_outputs(&a); break;
                     case SDLK_w: save_scene(&a); break;
                     case SDLK_3: a.tier = (LsTier)((a.tier + 1) % 3); break;
+                    case SDLK_f: a.show_drape = !a.show_drape; break;
+                    case SDLK_TAB: {
+                        /* Step through the lights, then the parts, then back to
+                         * nothing -- so everything is reachable without hunting
+                         * for it with the cursor. */
+                        int nl = a.d.nlights;
+                        if (a.sel_light >= 0) {
+                            a.sel_light++;
+                            if (a.sel_light >= nl) { a.sel_light = -1; a.sel_prim = 0; }
+                        } else if (a.sel_prim >= 0) {
+                            do { a.sel_prim++; }
+                            while (a.sel_prim < a.d.nprims &&
+                                   a.d.prims[a.sel_prim].light_id >= 0);
+                            if (a.sel_prim >= a.d.nprims) a.sel_prim = -1;
+                        } else if (nl > 0) {
+                            a.sel_light = 0;
+                        }
+                        if (a.sel_light >= 0) a.sel_prim = -1;
+                        a.focus = -1;
+                        break;
+                    }
                     case SDLK_a: if (!a.st.grid_mode)
                                      a.tool = (a.tool == UI_TOOL_LIGHT)
                                             ? UI_TOOL_NONE : UI_TOOL_LIGHT;
@@ -1013,6 +1316,16 @@ int main(int argc, char **argv) {
             }
             else if (e.type == SDL_MOUSEMOTION) {
                 a.t.hover = ui_hit_test(&a.t, e.motion.x, e.motion.y);
+                if (a.gz_active != GZ_NONE) {
+                    Camera gcam = orbit_camera(&a, rw, rh);
+                    gizmo_drag(&a, &gcam, e.motion.x, e.motion.y);
+                    last_x = e.motion.x; last_y = e.motion.y;
+                    break;
+                }
+                if (!a.st.grid_mode && !dragging && !moving && !scrubbing) {
+                    Camera gcam = orbit_camera(&a, rw, rh);
+                    a.gz_hover = gizmo_pick(&a, &gcam, e.motion.x, e.motion.y);
+                } else a.gz_hover = GZ_NONE;
                 if (scrubbing && a.focus >= 0 && a.focus < a.nfields) {
                     int dx = e.motion.x - scrub_start;
                     if (dx != 0) scrub_moved = true;
@@ -1063,11 +1376,11 @@ int main(int argc, char **argv) {
                 }
                 last_x = e.motion.x; last_y = e.motion.y;
                 a.have_hover = false;
-                if (a.st.grid_mode && a.nu > 0 && side > 0) {
-                    int gx = e.motion.x - cx, gy = e.motion.y - cy;
-                    if (gx >= 0 && gx < side && gy >= 0 && gy < side) {
-                        a.hover_i = gx * a.nu / side;
-                        a.hover_j = a.nv - 1 - (gy * a.nv / side);
+                if (a.nu > 0 && a.fmap_side > 0) {
+                    int gx = e.motion.x - a.fmap_x, gy = e.motion.y - a.fmap_y;
+                    if (gx >= 0 && gx < a.fmap_side && gy >= 0 && gy < a.fmap_side) {
+                        a.hover_i = gx * a.nu / a.fmap_side;
+                        a.hover_j = a.nv - 1 - (gy * a.nv / a.fmap_side);
                         a.have_hover = true;
                     }
                 }
@@ -1124,6 +1437,15 @@ int main(int argc, char **argv) {
                             scrub_moved = false;
                         }
                     } else if (!a.st.grid_mode) {
+                        Camera gcam = orbit_camera(&a, rw, rh);
+                        int handle = (a.tool == UI_TOOL_NONE)
+                                   ? gizmo_pick(&a, &gcam, e.button.x, e.button.y)
+                                   : GZ_NONE;
+                        if (handle != GZ_NONE) {
+                            scene_pause(&a); push_undo(&a); scene_resume(&a);
+                            gizmo_begin(&a, &gcam, e.button.x, e.button.y, handle);
+                            break;
+                        }
                         pending = true;
                         press_x = e.button.x; press_y = e.button.y;
                         /* Pressing on an already-selected object begins a move;
@@ -1151,6 +1473,13 @@ int main(int argc, char **argv) {
                 }
             }
             else if (e.type == SDL_MOUSEBUTTONUP) {
+                if (a.gz_active != GZ_NONE) {
+                    a.gz_active = GZ_NONE;
+                    solve_and_refresh(&a);
+                    pending = false;
+                    dragging = false;
+                    break;
+                }
                 if (scrubbing) {
                     if (scrub_moved) solve_and_refresh(&a);
                     else if (scrub_snapped) discard_last_undo(&a);
@@ -1190,11 +1519,38 @@ int main(int argc, char **argv) {
 
         /* ---- title ---- */
         snprintf(buf, sizeof buf, "%s", a.scene_path);
-        draw_text(ren, cx, 16, 2, a.st.grid_mode ? "FIELD MAP" : "PROGRESSIVE RENDER",
+        draw_text(ren, cx, 16, 2, a.st.grid_mode ? "FIELD MAP + 3D" : "3D + FIELD MAP",
                   COL_INK, 255);
         draw_text_right(ren, WIN_W - 18, 18, 1, buf, COL_MUTED, 255);
 
-        if (a.st.grid_mode && a.nu > 0) {
+        /* Both views are always on screen; the mode button decides which one gets
+         * the larger pane. Seeing the map beside the geometry is the point --
+         * a number on a false-colour plot means much more next to the thing it
+         * was measured on. */
+        {
+            int CW = WIN_W - cx - STATS_W - 30;
+            int CH = WIN_H - cy - PLOT_H - 46 - CBAR_H;
+            int gap = 16;
+            int pw = (int)(CW * 0.56), sw = CW - pw - gap;
+            int fside, tw3;
+            if (a.st.grid_mode) {
+                fside = pw < (CH - CBAR_H - 22) ? pw : (CH - CBAR_H - 22);
+                a.fmap_x = cx; a.fmap_y = cy;
+                tw3 = sw;
+                a.view_x = cx + pw + gap; a.view_y = cy;
+            } else {
+                tw3 = pw;
+                a.view_x = cx; a.view_y = cy;
+                fside = sw < (CH - CBAR_H - 22) ? sw : (CH - CBAR_H - 22);
+                a.fmap_x = cx + pw + gap; a.fmap_y = cy;
+            }
+            a.fmap_side = fside;
+            a.view_w = tw3;
+            a.view_h = tw3 * rh / rw;
+        }
+
+        if (a.nu > 0) {
+            int fx = a.fmap_x, fy = a.fmap_y, fside = a.fmap_side;
             /* false-colour field */
             unsigned char *px = malloc((size_t)a.nu * (size_t)a.nv * 3u);
             double span = a.hi - a.lo;
@@ -1208,20 +1564,21 @@ int main(int argc, char **argv) {
                 }
             SDL_UpdateTexture(grid_tex, NULL, px, a.nu * 3);
             free(px);
-            SDL_Rect dst = { cx, cy, side, side };
+            SDL_Rect dst = { fx, fy, fside, fside };
             SDL_RenderCopy(ren, grid_tex, NULL, &dst);
-            draw_rect_line(ren, cx, cy, side, side, COL_RULE, 255);
+            draw_rect_line(ren, fx, fy, fside, fside, COL_RULE, 255);
 
             if (a.have_hover) {
-                int hx = cx + a.hover_i * side / a.nu;
-                int hy = cy + (a.nv - 1 - a.hover_j) * side / a.nv;
-                draw_rect_line(ren, hx, cy, side / a.nu > 2 ? side / a.nu : 2, side,
+                int hx = fx + a.hover_i * fside / a.nu;
+                int hy = fy + (a.nv - 1 - a.hover_j) * fside / a.nv;
+                draw_rect_line(ren, hx, fy, fside / a.nu > 2 ? fside / a.nu : 2, fside,
                                COL_ACCENT, 70);
-                draw_rect_line(ren, cx, hy, side, side / a.nv > 2 ? side / a.nv : 2,
+                draw_rect_line(ren, fx, hy, fside, fside / a.nv > 2 ? fside / a.nv : 2,
                                COL_ACCENT, 140);
             }
-            draw_colorbar(ren, cx, cy + side + 12, side, CBAR_H, a.lo, a.hi, unit);
-        } else if (!a.st.grid_mode) {
+            draw_colorbar(ren, fx, fy + fside + 12, fside, CBAR_H, a.lo, a.hi, unit);
+        }
+        if (a.d.has_camera) {
             pthread_mutex_lock(&a.lock);
             SDL_UpdateTexture(rend_tex, NULL, a.rgb, rw * 3);
             pthread_mutex_unlock(&a.lock);
@@ -1236,16 +1593,17 @@ int main(int argc, char **argv) {
             SDL_Rect clip = { a.view_x, a.view_y, dw, dh };
             SDL_RenderSetClipRect(ren, &clip);
             Camera cam = orbit_camera(&a, rw, rh);
+            if (a.show_drape) draw_field_drape(ren, &a, &cam);
             draw_overlay(ren, &a, &cam);
+            gizmo_draw(ren, &a, &cam);
             SDL_RenderSetClipRect(ren, NULL);
 
             if (a.tool != UI_TOOL_NONE) {
-                snprintf(buf, sizeof buf, "CLICK A SURFACE TO PLACE %s   ESC CANCELS",
-                         a.tool == UI_TOOL_LIGHT ? "A LIGHT" : "A PART");
+                snprintf(buf, sizeof buf, "CLICK TO PLACE %s   ESC CANCELS",
+                         a.tool == UI_TOOL_LIGHT ? "LIGHT" : "PART");
                 draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_ACCENT, 255);
             } else {
-                snprintf(buf, sizeof buf,
-                         "%d PASSES  CLICK TO SELECT  DRAG SELECTION TO MOVE  DRAG ELSEWHERE TO ORBIT",
+                snprintf(buf, sizeof buf, "%d PASSES   CLICK SELECT   DRAG ORBIT",
                          atomic_load(&a.passes));
                 draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_MUTED, 255);
             }
@@ -1356,6 +1714,7 @@ int main(int argc, char **argv) {
     SDL_Quit();
     clear_stack(a.undo, &a.undo_n);
     clear_stack(a.redo, &a.redo_n);
+    free(a.drape);
     free(a.g_full); free(a.g_direct); free(a.disp); free(a.other); free(a.rgb);
     ls_film_free(&a.film);
     ls_scene_desc_free(&a.d);

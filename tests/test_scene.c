@@ -83,6 +83,91 @@ static void check_pairing(const SceneDesc *d) {
 }
 
 void test_scene(void) {
+    SECTION("rotation maths and gizmo ray queries");
+    {
+        /* Rodrigues: a quarter turn about +z takes +x to +y. */
+        vec3 r = v3rotate(v3(1, 0, 0), v3(0, 0, 1), LS_PI / 2.0);
+        CHECK_NEAR(r.x, 0.0, 1e-12);
+        CHECK_NEAR(r.y, 1.0, 1e-12);
+        CHECK_NEAR(r.z, 0.0, 1e-12);
+
+        /* A vector on the axis is unmoved, and length is preserved. */
+        vec3 onaxis = v3rotate(v3(0, 0, 3), v3(0, 0, 1), 1.234);
+        CHECK_NEAR(onaxis.z, 3.0, 1e-12);
+        Rng rng = ls_rng_seed(0xB0Bu, 3);
+        for (int i = 0; i < 500; ++i) {
+            vec3 v = v3(ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5);
+            vec3 ax = v3norm(v3(ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5,
+                                ls_rng_f(&rng) - 0.5));
+            double ang = (ls_rng_f(&rng) - 0.5) * 6.0;
+            vec3 w = v3rotate(v, ax, ang);
+            CHECK_NEAR(v3len(w), v3len(v), 1e-12);
+            /* Rotating back returns the original. */
+            vec3 back = v3rotate(w, ax, -ang);
+            CHECK_NEAR(v3dist(back, v), 0.0, 1e-9);
+        }
+
+        /* Closest point on an axis to a ray: a ray crossing the x axis at
+         * x = 2 must give t = 2. */
+        double t = 0.0;
+        CHECK(ls_line_closest_t(v3(0, 0, 0), v3(1, 0, 0),
+                                v3(2, -5, 0), v3(0, 1, 0), &t));
+        CHECK_NEAR(t, 2.0, 1e-12);
+        /* Parallel lines have no well-defined closest point. */
+        CHECK(!ls_line_closest_t(v3(0, 0, 0), v3(1, 0, 0),
+                                 v3(0, 1, 0), v3(1, 0, 0), &t));
+
+        /* Ray-plane, and the parallel rejection. */
+        vec3 hit;
+        CHECK(ls_ray_plane(v3(0, 0, 5), v3(0, 0, -1), v3(0, 0, 1), v3(0, 0, 1), &hit));
+        CHECK_NEAR(hit.z, 1.0, 1e-12);
+        CHECK(!ls_ray_plane(v3(0, 0, 5), v3(1, 0, 0), v3(0, 0, 1), v3(0, 0, 1), &hit));
+    }
+
+    SECTION("rotating an object keeps it physically consistent");
+    {
+        SceneDesc d;
+        if (!ls_scene_load(&d, SCENE_IN)) return;
+
+        const Light *l0 = &d.lights[0];
+        CHECK(l0->kind == LS_LIGHT_RECT);
+        double area0 = l0->area, phi0 = l0->phi_e, rad0 = l0->radiance;
+        vec3 n0 = l0->n;
+
+        /* A quarter turn about +x should tip a downward-facing panel to face
+         * along -y, and must change nothing about how much light it emits. */
+        CHECK(ls_scene_rotate_light(&d, 0, v3(1, 0, 0), LS_PI / 2.0));
+        CHECK_NEAR(d.lights[0].area, area0, 1e-12);
+        CHECK_NEAR(d.lights[0].phi_e, phi0, 1e-12);
+        CHECK_NEAR(d.lights[0].radiance, rad0, 1e-12);
+        CHECK_NEAR(v3len(d.lights[0].n), 1.0, 1e-12);
+        CHECK_NEAR(v3dot(d.lights[0].n, n0), 0.0, 1e-9);   /* turned 90 degrees */
+        /* The flux self-check inside finalize still holds. */
+        CHECK_NEAR(ls_light_emitted_flux(&d.lights[0]), phi0, 1e-9);
+        /* And the paired geometry turned with it. */
+        check_pairing(&d);
+
+        /* Turning back restores the original orientation exactly. */
+        CHECK(ls_scene_rotate_light(&d, 0, v3(1, 0, 0), -LS_PI / 2.0));
+        CHECK_NEAR(v3dist(d.lights[0].n, n0), 0.0, 1e-9);
+
+        /* An isotropic source has no orientation to turn. */
+        Light sph = ls_light_sphere(v3(0, 0, 0.2), 0.02, 0.5, ls_spectrum_const(1.0));
+        int si = ls_scene_add_light(&d, sph);
+        CHECK(!ls_scene_rotate_light(&d, si, v3(0, 0, 1), 1.0));
+
+        /* Rotating an area light's own face turns the LIGHT, so the two cannot
+         * drift apart -- the failure that is invisible in the field map. */
+        int pi = ls_scene_light_prim(&d, 0);
+        CHECK(pi >= 0);
+        vec3 before = d.lights[0].n;
+        CHECK(ls_scene_rotate_prim(&d, pi, v3(0, 1, 0), 0.3));
+        CHECK(v3dist(d.lights[0].n, before) > 1e-6);
+        check_pairing(&d);
+
+        ls_scene_desc_free(&d);
+    }
+
     SECTION("camera projection is the exact inverse of the pick ray");
     {
         /* Picking a light that has no geometry, and drawing every overlay

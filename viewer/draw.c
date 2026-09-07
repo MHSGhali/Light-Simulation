@@ -13,6 +13,9 @@ const Col COL_ACCENT = { 0x54, 0xC3, 0xB4 };
 const Col COL_S1     = { 0x39, 0x87, 0xE5 };
 const Col COL_S2     = { 0xD9, 0x59, 0x26 };
 const Col COL_WARN   = { 0xED, 0xA1, 0x00 };
+const Col COL_AXIS_X = { 0xE3, 0x49, 0x48 };
+const Col COL_AXIS_Y = { 0x1B, 0xAF, 0x7A };
+const Col COL_AXIS_Z = { 0x39, 0x87, 0xE5 };
 
 void draw_rect_fill(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 a) {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, a);

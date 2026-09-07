@@ -10,6 +10,9 @@
 typedef struct { Uint8 r, g, b; } Col;
 extern const Col COL_BG, COL_PANEL, COL_RULE, COL_INK, COL_MUTED,
                  COL_ACCENT, COL_S1, COL_S2, COL_WARN;
+/* Gizmo axis colours, taken from the validated categorical palette so the three
+ * stay distinguishable to a colour-blind reader as well. */
+extern const Col COL_AXIS_X, COL_AXIS_Y, COL_AXIS_Z;
 
 void draw_rect_fill(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 a);
 void draw_rect_line(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 a);

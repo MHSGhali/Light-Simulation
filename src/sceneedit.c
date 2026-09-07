@@ -176,6 +176,55 @@ void ls_scene_remove_light(SceneDesc *d, int index) {
     ls_scene_rebuild(d);
 }
 
+bool ls_scene_rotate_light(SceneDesc *d, int index, vec3 axis, ls_real angle) {
+    if (index < 0 || index >= d->nlights) return false;
+    Light *l = &d->lights[index];
+    vec3 a = v3norm(axis);
+    switch (l->kind) {
+        case LS_LIGHT_RECT:
+            /* Turn the edge vectors and let the normal follow from them, so the
+             * emitting face cannot end up disagreeing with the geometry. */
+            l->ex = v3rotate(l->ex, a, angle);
+            l->ey = v3rotate(l->ey, a, angle);
+            l->n = v3norm(v3cross(l->ex, l->ey));
+            break;
+        case LS_LIGHT_DISK:
+        case LS_LIGHT_SPOT:
+        case LS_LIGHT_DIRECTIONAL:
+            l->n = v3norm(v3rotate(l->n, a, angle));
+            break;
+        case LS_LIGHT_POINT:
+        case LS_LIGHT_SPHERE:
+            return false;                 /* isotropic: nothing to turn */
+    }
+    ls_scene_update_light(d, index);
+    return true;
+}
+
+bool ls_scene_rotate_prim(SceneDesc *d, int index, vec3 axis, ls_real angle) {
+    if (index < 0 || index >= d->nprims) return false;
+    Prim *p = &d->prims[index];
+    vec3 a = v3norm(axis);
+    switch (p->kind) {
+        case LS_PRIM_QUAD:
+            p->ex = v3rotate(p->ex, a, angle);
+            p->ey = v3rotate(p->ey, a, angle);
+            p->n = v3norm(v3rotate(p->n, a, angle));
+            break;
+        case LS_PRIM_PLANE:
+        case LS_PRIM_DISK:
+            p->n = v3norm(v3rotate(p->n, a, angle));
+            break;
+        case LS_PRIM_SPHERE:
+            return false;
+    }
+    /* A prim bound to an area light is that light's own face; turn the light so
+     * the two cannot drift apart. */
+    if (p->light_id >= 0) return ls_scene_rotate_light(d, p->light_id, a, angle);
+    ls_scene_rebuild(d);
+    return true;
+}
+
 int ls_scene_duplicate_light(SceneDesc *d, int index, vec3 offset) {
     if (index < 0 || index >= d->nlights) return -1;
     Light copy = d->lights[index];
