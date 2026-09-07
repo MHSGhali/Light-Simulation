@@ -29,3 +29,31 @@ Ray ls_camera_ray(const Camera *c, int x, int y, ls_real jx, ls_real jy) {
     r.tmax = HUGE_VAL;
     return r;
 }
+
+Ray ls_camera_pick_ray(const Camera *c, ls_real sx, ls_real sy) {
+    ls_real aspect = (ls_real)c->width / (ls_real)c->height;
+    ls_real half_h = tan(0.5 * c->fov_y);
+    ls_real half_w = half_h * aspect;
+    ls_real nx = (2.0 * (sx / (ls_real)c->width)  - 1.0) * half_w;
+    ls_real ny = (1.0 - 2.0 * (sy / (ls_real)c->height)) * half_h;
+    Ray r;
+    r.o = c->eye;
+    r.d = v3norm(v3add(c->fwd, v3add(v3scale(c->right, nx), v3scale(c->up, ny))));
+    r.tmin = 0.0;
+    r.tmax = HUGE_VAL;
+    return r;
+}
+
+bool ls_camera_project(const Camera *c, vec3 p, ls_real *sx, ls_real *sy) {
+    vec3 v = v3sub(p, c->eye);
+    ls_real z = v3dot(v, c->fwd);
+    if (z <= 1e-9) return false;               /* at or behind the eye plane */
+    ls_real aspect = (ls_real)c->width / (ls_real)c->height;
+    ls_real half_h = tan(0.5 * c->fov_y);
+    ls_real half_w = half_h * aspect;
+    ls_real nx = v3dot(v, c->right) / z;
+    ls_real ny = v3dot(v, c->up)    / z;
+    *sx = (nx / half_w + 1.0) * 0.5 * (ls_real)c->width;
+    *sy = (1.0 - ny / half_h) * 0.5 * (ls_real)c->height;
+    return true;
+}
