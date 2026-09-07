@@ -92,12 +92,22 @@ void ls_trace_radiance_ex(const Scene *sc, Ray ray, Rng *rng, int max_depth,
         if (m->emissive && use_bsdf && depth >= skip_emission_before) {
             ls_real w = 1.0;
             if (!prev_delta && h.light_id >= 0 && (strat & LS_STRAT_NEE)) {
-                /* This emitter is also sampleable, so weight against NEE. */
-                ls_real pl = ls_light_pdf_w(&sc->lights[h.light_id], ray.o, h.p, ns);
+                /* h.ng, NOT ns. ls_light_pdf_w returns 0 when the emitter is
+                 * seen from behind; handing it the ray-facing normal makes that
+                 * cosine positive on a backface hit, so BSDF sampling would
+                 * claim a density for a connection NEE refuses to make, and the
+                 * MIS weights would stop summing to one. */
+                ls_real pl = ls_light_pdf_w(&sc->lights[h.light_id], ray.o, h.p, h.ng);
                 w = ls_mis_power2(pdf_bsdf_prev, pl);
             }
             Spectrum le = m->le;
-            if (v3dot(ns, v3neg(ray.d)) <= 0.0) le = ls_spectrum_zero();
+            /* Also h.ng. `ns` has already been flipped to face the incoming ray,
+             * so dot(ns, -ray.d) is >= 0 for every hit and this gate could never
+             * fire -- emitters found by scattering were effectively two-sided
+             * while ls_light_radiance and ls_light_pdf_w treated them as
+             * one-sided, so NEE and BSDF sampling disagreed about the back of
+             * every area light. */
+            if (v3dot(h.ng, v3neg(ray.d)) <= 0.0) le = ls_spectrum_zero();
             deposit(out, a_row, &beta, &le, w, h.light_id);
         }
 

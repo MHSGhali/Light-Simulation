@@ -101,6 +101,57 @@ void test_furnace(void) {
         NOTE("per-depth series matches Le(1-rho^(k+1))/(1-rho) for k = 0..6");
     }
 
+    SECTION("one-sided emitters agree between strategies");
+    {
+        /* An area light emits from one face only. NEE enforces that through
+         * ls_light_pdf_w's cos_y test; BSDF sampling has to agree, or the two
+         * strategies disagree about the back of every light and MIS silently
+         * loses energy. The regression this guards: the emitter gate used the
+         * ray-facing shading normal, which is flipped on a backface hit and so
+         * could never fire -- making emitters two-sided to scattering only. */
+        Light lt = ls_light_rect(v3(0, 0, 0), v3(0.5, 0, 0), v3(0, -0.5, 0),
+                                 100.0, ls_spectrum_const(1.0));
+        ls_light_finalize(&lt, 0);
+        CHECK_NEAR(lt.n.z, -1.0, 1e-12);              /* faces -z */
+
+        Material m;
+        memset(&m, 0, sizeof m);
+        m.bsdf.kind = LS_BSDF_LAMBERT;
+        m.bsdf.rho  = ls_spectrum_zero();
+        m.le        = ls_spectrum_scale(lt.s_hat, lt.radiance);
+        m.emissive  = true;
+
+        Prim pr;
+        memset(&pr, 0, sizeof pr);
+        pr.kind = LS_PRIM_QUAD; pr.c = lt.p; pr.n = lt.n;
+        pr.ex = lt.ex; pr.ey = lt.ey; pr.mat_id = 0; pr.light_id = 0;
+
+        Scene sc = { .prims = &pr, .nprims = 1, .mats = &m, .nmats = 1,
+                     .lights = &lt, .nlights = 1 };
+
+        LsStrategy all[3] = { LS_STRAT_NEE, LS_STRAT_BSDF, LS_STRAT_MIS };
+        for (int s = 0; s < 3; ++s) {
+            /* Looking up at the emitting face: all three see the same radiance. */
+            Ray front = { v3(0, 0, -1), v3(0, 0, 1), 0.0, HUGE_VAL };
+            /* Looking down at the dark back: all three must see exactly zero. */
+            Ray back  = { v3(0, 0,  1), v3(0, 0, -1), 0.0, HUGE_VAL };
+            SpectrumAcc a;
+            ls_trace_radiance(&sc, back, &rng, 1, all[s], &a, NULL);
+            Spectrum L = ls_acc_mean(&a, 1);
+            CHECK_NEAR(ls_spectrum_integrate(&L), 0.0, 1e-12);
+            if (all[s] & LS_STRAT_BSDF) {
+                ls_trace_radiance(&sc, front, &rng, 1, all[s], &a, NULL);
+                L = ls_acc_mean(&a, 1);
+                CHECK(ls_spectrum_integrate(&L) > 0.0);
+            }
+        }
+        /* And the irradiance behind the panel is zero, which is what NEE says. */
+        SpectrumAcc acc;
+        ls_estimate_irradiance(&sc, v3(0, 0, 0.5), v3(0, 0, 1), 512, &rng, &acc, NULL);
+        Spectrum E = ls_acc_mean(&acc, 1);
+        CHECK_NEAR(ls_spectrum_integrate(&E), 0.0, 1e-12);
+    }
+
     SECTION("strategy agreement: NEE vs BSDF vs MIS");
     {
         /* NEE and BSDF sampling are each independently unbiased, so requiring

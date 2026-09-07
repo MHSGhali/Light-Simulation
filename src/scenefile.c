@@ -1,4 +1,5 @@
 #include "lightsim/scenefile.h"
+#include "lightsim/sceneedit.h"
 #include "lightsim/units.h"
 #include "lightsim/bsdf.h"
 #include <stdio.h>
@@ -52,14 +53,25 @@ static int find_mat(SceneDesc *d, const char *name) {
     return -1;
 }
 
-static Spectrum parse_spd(P *p) {
+/* The spectrum, plus a record of how it was spelled, so ls_scene_save can
+ * write the scene back in the form it was authored rather than as 95 bins. */
+static Spectrum parse_spd(P *p, LsSpdKind *kind, ls_real *a, ls_real *b) {
+    *kind = LS_SPD_FLAT; *a = 0.0; *b = 0.0;
     char *t = tok(p);
     if (!t) { p->ok = false; return ls_spectrum_const(1.0); }
-    if (strcmp(t, "flat") == 0)      return ls_spectrum_const(1.0);
-    if (strcmp(t, "blackbody") == 0) return ls_spectrum_blackbody(num(p));
-    if (strcmp(t, "daylight") == 0)  return ls_spectrum_daylight(num(p));
-    if (strcmp(t, "led") == 0)     { ls_real c = num(p), w = num(p);
-                                     return ls_spectrum_gaussian(c, w, 1.0); }
+    if (strcmp(t, "flat") == 0) return ls_spectrum_const(1.0);
+    if (strcmp(t, "blackbody") == 0) {
+        *kind = LS_SPD_BLACKBODY; *a = num(p);
+        return ls_spectrum_blackbody(*a);
+    }
+    if (strcmp(t, "daylight") == 0) {
+        *kind = LS_SPD_DAYLIGHT; *a = num(p);
+        return ls_spectrum_daylight(*a);
+    }
+    if (strcmp(t, "led") == 0) {
+        *kind = LS_SPD_LED; *a = num(p); *b = num(p);
+        return ls_spectrum_gaussian(*a, *b, 1.0);
+    }
     p->ok = false;
     snprintf(p->d->err, sizeof p->d->err, "unknown spectrum '%s'", t);
     return ls_spectrum_const(1.0);
@@ -67,13 +79,22 @@ static Spectrum parse_spd(P *p) {
 
 /* Reads "<W|lm> <value> <spd>" and returns radiant flux in watts. Lumens are
  * converted here and never stored, so no photometric value reaches a light. */
-static ls_real parse_flux(P *p, Spectrum *spd_out) {
+typedef struct {
+    LsSpdKind kind;
+    ls_real   a, b;
+    bool      in_lumens;
+    ls_real   authored;      /* the number given, in the unit given */
+} Authored;
+
+static ls_real parse_flux(P *p, Spectrum *spd_out, Authored *rec) {
     char *unit = tok(p);
     if (!unit) { p->ok = false; return 0.0; }
     ls_real value = num(p);
-    *spd_out = parse_spd(p);
-    if (strcmp(unit, "W") == 0)  return value;
-    if (strcmp(unit, "lm") == 0) return ls_watts_from_lumens(value, spd_out);
+    *spd_out = parse_spd(p, &rec->kind, &rec->a, &rec->b);
+    rec->authored = value;
+    if (strcmp(unit, "W") == 0)  { rec->in_lumens = false; return value; }
+    if (strcmp(unit, "lm") == 0) { rec->in_lumens = true;
+                                   return ls_watts_from_lumens(value, spd_out); }
     p->ok = false;
     snprintf(p->d->err, sizeof p->d->err, "flux unit must be W or lm, got '%s'", unit);
     return 0.0;
@@ -82,38 +103,6 @@ static ls_real parse_flux(P *p, Spectrum *spd_out) {
 static void add_prim(SceneDesc *d, Prim pr) {
     GROW(d->prims, d->nprims, d->cap_prims, Prim);
     d->prims[d->nprims++] = pr;
-}
-
-/* Emissive geometry bound to an area light, so it is visible to the camera and
- * findable by BSDF sampling. */
-static void add_emissive_geom(SceneDesc *d, const Light *l, int light_index) {
-    Material m;
-    memset(&m, 0, sizeof m);
-    m.bsdf.kind = LS_BSDF_LAMBERT;
-    m.bsdf.rho  = ls_spectrum_zero();
-    m.le        = ls_spectrum_scale(l->s_hat, l->radiance);
-    m.emissive  = true;
-    ensure_mat_capacity(d);
-    int mid = d->nmats;
-    d->mats[d->nmats] = m;
-    snprintf(d->names[d->nmats], 32, "__emit%d", light_index);
-    d->nmats++;
-
-    Prim pr;
-    memset(&pr, 0, sizeof pr);
-    pr.mat_id = mid;
-    pr.light_id = light_index;
-    switch (l->kind) {
-        case LS_LIGHT_RECT:
-            pr.kind = LS_PRIM_QUAD; pr.c = l->p; pr.n = l->n;
-            pr.ex = l->ex; pr.ey = l->ey; break;
-        case LS_LIGHT_DISK:
-            pr.kind = LS_PRIM_DISK; pr.c = l->p; pr.n = l->n; pr.r = l->radius; break;
-        case LS_LIGHT_SPHERE:
-            pr.kind = LS_PRIM_SPHERE; pr.c = l->p; pr.r = l->radius; break;
-        default: return;              /* delta lights have no geometry */
-    }
-    add_prim(d, pr);
 }
 
 bool ls_scene_load(SceneDesc *d, const char *path) {
@@ -137,6 +126,7 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             ls_real fov = num(&p);
             int w = (int)num(&p), h = (int)num(&p);
             d->camera = ls_camera_look_at(eye, target, v3(0, 0, 1), fov, w, h);
+            d->cam_eye = eye; d->cam_target = target; d->cam_fov_deg = fov;
             d->has_camera = true;
         } else if (strcmp(t, "grid") == 0) {
             d->grid_o = vec(&p); d->grid_u = vec(&p); d->grid_v = vec(&p);
@@ -154,9 +144,12 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             } else if (strcmp(kind, "metal") == 0) {
                 char *which = tok(&p);
                 m.bsdf.kind = LS_BSDF_CONDUCTOR;
-                if      (which && strcmp(which, "cu") == 0) ls_metal_copper(&m.bsdf.eta, &m.bsdf.kappa);
-                else if (which && strcmp(which, "au") == 0) ls_metal_gold(&m.bsdf.eta, &m.bsdf.kappa);
-                else                                        ls_metal_aluminium(&m.bsdf.eta, &m.bsdf.kappa);
+                if      (which && strcmp(which, "cu") == 0) { ls_metal_copper(&m.bsdf.eta, &m.bsdf.kappa);
+                                                              snprintf(m.metal, sizeof m.metal, "cu"); }
+                else if (which && strcmp(which, "au") == 0) { ls_metal_gold(&m.bsdf.eta, &m.bsdf.kappa);
+                                                              snprintf(m.metal, sizeof m.metal, "au"); }
+                else                                        { ls_metal_aluminium(&m.bsdf.eta, &m.bsdf.kappa);
+                                                              snprintf(m.metal, sizeof m.metal, "al"); }
                 m.bsdf.alpha = num(&p);
             } else if (strcmp(kind, "emit") == 0) {
                 m.bsdf.kind = LS_BSDF_LAMBERT;
@@ -197,34 +190,37 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             if (!kind) { p.ok = false; break; }
             Light l;
             Spectrum spd;
+            Authored rec;
+            memset(&rec, 0, sizeof rec);
             if (strcmp(kind, "point") == 0) {
                 vec3 pos = vec(&p);
-                ls_real w = parse_flux(&p, &spd);
+                ls_real w = parse_flux(&p, &spd, &rec);
                 l = ls_light_point(pos, w, spd);
             } else if (strcmp(kind, "spot") == 0) {
                 vec3 pos = vec(&p), dir = vec(&p);
                 ls_real total = num(&p) * LS_PI / 180.0;
                 ls_real fall  = num(&p) * LS_PI / 180.0;
-                ls_real w = parse_flux(&p, &spd);
+                ls_real w = parse_flux(&p, &spd, &rec);
                 l = ls_light_spot(pos, dir, total, fall, w, spd);
             } else if (strcmp(kind, "rect") == 0) {
                 vec3 c = vec(&p), ex = vec(&p), ey = vec(&p);
-                ls_real w = parse_flux(&p, &spd);
+                ls_real w = parse_flux(&p, &spd, &rec);
                 l = ls_light_rect(c, ex, ey, w, spd);
             } else if (strcmp(kind, "disk") == 0) {
                 vec3 c = vec(&p), n = vec(&p);
                 ls_real r = num(&p);
-                ls_real w = parse_flux(&p, &spd);
+                ls_real w = parse_flux(&p, &spd, &rec);
                 l = ls_light_disk(c, n, r, w, spd);
             } else if (strcmp(kind, "sphere") == 0) {
                 vec3 c = vec(&p);
                 ls_real r = num(&p);
-                ls_real w = parse_flux(&p, &spd);
+                ls_real w = parse_flux(&p, &spd, &rec);
                 l = ls_light_sphere(c, r, w, spd);
             } else if (strcmp(kind, "sun") == 0) {
                 vec3 dir = vec(&p);
                 ls_real e = num(&p);
-                spd = parse_spd(&p);
+                spd = parse_spd(&p, &rec.kind, &rec.a, &rec.b);
+                rec.authored = e; rec.in_lumens = false;
                 l = ls_light_directional(dir, e, spd);
             } else {
                 p.ok = false;
@@ -232,11 +228,19 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
                 break;
             }
             if (!p.ok) break;
+            l.spd_kind = rec.kind;
+            l.spd_a = rec.a;
+            l.spd_b = rec.b;
+            l.flux_in_lumens = rec.in_lumens;
+            l.flux_authored = rec.authored;
             GROW(d->lights, d->nlights, d->cap_lights, Light);
             int idx = d->nlights;
             ls_light_finalize(&l, idx);
             d->lights[d->nlights++] = l;
-            add_emissive_geom(d, &d->lights[idx], idx);
+            /* One implementation of the light/geometry pairing, shared with
+             * the editor -- see ls_scene_sync_light_geom. */
+            ls_scene_rebuild(d);
+            ls_scene_sync_light_geom(d, idx);
         } else {
             p.ok = false;
             snprintf(d->err, sizeof d->err, "unknown directive '%s'", t);
@@ -245,13 +249,125 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
 
     free(buf);
     if (!p.ok) return false;
-    d->scene.prims = d->prims;   d->scene.nprims = d->nprims;
-    d->scene.mats  = d->mats;    d->scene.nmats  = d->nmats;
-    d->scene.lights = d->lights; d->scene.nlights = d->nlights;
+    ls_scene_rebuild(d);
     return true;
 }
 
 void ls_scene_desc_free(SceneDesc *d) {
     free(d->prims); free(d->mats); free(d->names); free(d->lights);
     memset(d, 0, sizeof *d);
+}
+
+/* ------------------------------------------------------------------ writer */
+
+static void wvec(FILE *f, vec3 v) {
+    fprintf(f, " %.6g %.6g %.6g", v.x, v.y, v.z);
+}
+
+/* The spectrum clause, spelled the way it was authored. */
+static void wspd(FILE *f, const Light *l) {
+    switch (l->spd_kind) {
+        case LS_SPD_BLACKBODY: fprintf(f, " blackbody %.6g", l->spd_a); break;
+        case LS_SPD_DAYLIGHT:  fprintf(f, " daylight %.6g", l->spd_a);  break;
+        case LS_SPD_LED:       fprintf(f, " led %.6g %.6g", l->spd_a, l->spd_b); break;
+        case LS_SPD_FLAT:
+        default:               fprintf(f, " flat"); break;
+    }
+}
+
+/* The flux clause, in the unit it was given in. A light created in the editor
+ * rather than parsed has flux_authored == 0, so fall back to its watts. */
+static void wflux(FILE *f, const Light *l) {
+    if (l->flux_authored > 0.0)
+        fprintf(f, " %s %.6g", l->flux_in_lumens ? "lm" : "W", l->flux_authored);
+    else
+        fprintf(f, " W %.8g", l->kind == LS_LIGHT_DIRECTIONAL ? l->e_perp : l->phi_e);
+}
+
+bool ls_scene_save(const SceneDesc *d, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+
+    fprintf(f, "# lightsim scene\n\n");
+
+    for (int i = 0; i < d->nmats; ++i) {
+        const Material *m = &d->mats[i];
+        /* Emissive materials generated for an area light's geometry are
+         * recreated on load; writing them would duplicate the light. */
+        if (strncmp(d->names[i], "__emit", 6) == 0) continue;
+        if (m->emissive)
+            fprintf(f, "material %s emit %.6g\n", d->names[i], ls_spectrum_mean(&m->le));
+        else if (m->bsdf.kind == LS_BSDF_CONDUCTOR)
+            fprintf(f, "material %s metal %s %.6g\n", d->names[i],
+                    m->metal[0] ? m->metal : "al", m->bsdf.alpha);
+        else
+            fprintf(f, "material %s lambert %.6g\n", d->names[i],
+                    ls_spectrum_mean(&m->bsdf.rho));
+    }
+
+    fprintf(f, "\n");
+    for (int i = 0; i < d->nprims; ++i) {
+        const Prim *p = &d->prims[i];
+        if (p->light_id >= 0) continue;          /* an area light's own geometry */
+        if (p->mat_id < 0 || p->mat_id >= d->nmats) continue;
+        const char *mat = d->names[p->mat_id];
+        switch (p->kind) {
+            case LS_PRIM_PLANE:
+                fprintf(f, "plane %s", mat);  wvec(f, p->c); wvec(f, p->n);
+                fprintf(f, "\n"); break;
+            case LS_PRIM_QUAD:
+                fprintf(f, "quad %s", mat);   wvec(f, p->c); wvec(f, p->n);
+                wvec(f, p->ex); wvec(f, p->ey); fprintf(f, "\n"); break;
+            case LS_PRIM_SPHERE:
+                fprintf(f, "sphere %s", mat); wvec(f, p->c);
+                fprintf(f, " %.6g\n", p->r); break;
+            case LS_PRIM_DISK:
+                /* Not a parseable primitive directive today; skip rather than
+                 * write something the loader would reject. */
+                break;
+        }
+    }
+
+    fprintf(f, "\n");
+    for (int i = 0; i < d->nlights; ++i) {
+        const Light *l = &d->lights[i];
+        switch (l->kind) {
+            case LS_LIGHT_POINT:
+                fprintf(f, "light point");  wvec(f, l->p); wflux(f, l); break;
+            case LS_LIGHT_SPOT:
+                fprintf(f, "light spot");   wvec(f, l->p); wvec(f, l->n);
+                fprintf(f, " %.6g %.6g",
+                        acos(ls_clamp(l->cos_total, -1.0, 1.0)) * 180.0 / LS_PI,
+                        acos(ls_clamp(l->cos_falloff, -1.0, 1.0)) * 180.0 / LS_PI);
+                wflux(f, l); break;
+            case LS_LIGHT_RECT:
+                fprintf(f, "light rect");   wvec(f, l->p); wvec(f, l->ex); wvec(f, l->ey);
+                wflux(f, l); break;
+            case LS_LIGHT_DISK:
+                fprintf(f, "light disk");   wvec(f, l->p); wvec(f, l->n);
+                fprintf(f, " %.6g", l->radius); wflux(f, l); break;
+            case LS_LIGHT_SPHERE:
+                fprintf(f, "light sphere"); wvec(f, l->p);
+                fprintf(f, " %.6g", l->radius); wflux(f, l); break;
+            case LS_LIGHT_DIRECTIONAL:
+                fprintf(f, "light sun");    wvec(f, l->n);
+                fprintf(f, " %.6g", l->e_perp); break;
+        }
+        wspd(f, l);
+        fprintf(f, "\n");
+    }
+
+    if (d->has_grid) {
+        fprintf(f, "\ngrid");
+        wvec(f, d->grid_o); wvec(f, d->grid_u); wvec(f, d->grid_v);
+        fprintf(f, " %d %d\n", d->grid_nu, d->grid_nv);
+    }
+    if (d->has_camera) {
+        fprintf(f, "camera");
+        wvec(f, d->cam_eye); wvec(f, d->cam_target);
+        fprintf(f, " %.6g %d %d\n", d->cam_fov_deg, d->camera.width, d->camera.height);
+    }
+
+    fclose(f);
+    return true;
 }

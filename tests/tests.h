@@ -6,4 +6,5 @@ void test_transport(void);
 void test_bsdf(void);
 void test_furnace(void);
 void test_ui(void);
+void test_scene(void);
 #endif
