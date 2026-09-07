@@ -202,6 +202,18 @@ void test_scene(void) {
         CHECK(worst < 1e-9);
         NOTE("projection round-trip over %d samples: worst error %.2e px", n, worst);
 
+        /* A camera from ls_camera_look_at must be perspective. This looks
+         * trivial and is not: `ortho` was added to Camera without being
+         * initialised here, so every perspective camera carried a garbage
+         * boolean and could behave as orthographic depending on stack
+         * contents. UBSan caught it; this keeps it caught. */
+        for (int i = 0; i < 64; ++i) {
+            Camera c = ls_camera_look_at(v3(ls_rng_f(&rng), ls_rng_f(&rng), 1.0),
+                                         v3(0, 0, 0), v3(0, 0, 1), 40.0, 64, 64);
+            CHECK(c.ortho == false);
+            CHECK(c.ortho_height == 0.0);
+        }
+
         /* The same round-trip for the orthographic camera the plan view uses. */
         double worst_o = 0.0;
         for (int trial = 0; trial < 60; ++trial) {
