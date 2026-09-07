@@ -21,6 +21,19 @@
 #include "geom.h"
 #include "spectrum.h"
 
+/* How a light's spectrum was authored.
+ *
+ * Kept alongside the sampled s_hat for two reasons: the scene can be written
+ * back in the form it was written in, and an editor can offer "colour
+ * temperature" rather than 95 opaque bins. s_hat stays the single source of
+ * truth for the physics -- this record only says where it came from. */
+typedef enum {
+    LS_SPD_FLAT,
+    LS_SPD_BLACKBODY,      /* a = temperature, K            */
+    LS_SPD_DAYLIGHT,       /* a = correlated colour temp, K */
+    LS_SPD_LED             /* a = centre nm, b = FWHM nm    */
+} LsSpdKind;
+
 typedef enum {
     LS_LIGHT_POINT,        /* isotropic delta source                        */
     LS_LIGHT_DIRECTIONAL,  /* delta direction, infinitely far (sun)         */
@@ -46,6 +59,13 @@ typedef struct {
     ls_real   area;        /* emitting area, m^2                            */
     ls_real   radiance;    /* area lights: uniform radiance scale, W/(m^2 sr)*/
     int       index;       /* column in the contribution matrix             */
+
+    /* ---- authoring record; see LsSpdKind ---- */
+    LsSpdKind spd_kind;
+    ls_real   spd_a, spd_b;
+    bool      flux_in_lumens;   /* the unit the flux was given in    */
+    ls_real   flux_authored;    /* the number given, in that unit    */
+    char      name[32];         /* optional label, "" if unnamed     */
 } Light;
 
 /* A sample of a light, taken from a shading point.

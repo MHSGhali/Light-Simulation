@@ -12,6 +12,7 @@ typedef struct {
     Bsdf     bsdf;
     Spectrum le;        /* emitted radiance W/(m^2 sr nm); zero if not emissive */
     bool     emissive;
+    char     metal[8];  /* conductor preset ("al"/"cu"/"au"), for round-tripping */
 } Material;
 
 typedef struct {

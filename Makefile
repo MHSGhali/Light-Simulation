@@ -30,7 +30,11 @@ else ifeq ($(VARIANT),ubsan)
   SAN  := -fsanitize=undefined -fno-sanitize-recover=all
 endif
 
-CFLAGS  := $(CSTD) $(WARN) $(OPT) $(SAN) -Iinclude
+# -MMD -MP emits a .d file of header prerequisites next to every object.
+# Without this a change to a struct in a header recompiles only the .c files
+# that changed, and the rest of the build keeps the OLD struct layout -- which
+# does not fail to link, it just reads garbage at runtime.
+CFLAGS  := $(CSTD) $(WARN) $(OPT) $(SAN) -Iinclude -MMD -MP
 LDLIBS  := -lm -lpthread
 
 BUILD   := build/$(VARIANT)
@@ -112,6 +116,8 @@ check-purity:
 	    echo "FAIL: photometry leaked out of the units layer (above)"; exit 1; \
 	fi
 	@echo "check-purity: transport core is free of photometric constants"
+
+-include $(OBJ:.o=.d) $(TESTOBJ:.o=.d) $(APPOBJ:.o=.d) $(VIEWOBJ:.o=.d)
 
 clean:
 	rm -rf build lightsim lightsim-view run_tests

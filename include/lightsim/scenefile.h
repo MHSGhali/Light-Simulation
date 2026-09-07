@@ -32,6 +32,11 @@ typedef struct {
     Scene    scene;
     Camera   camera;
     bool     has_camera;
+    /* The camera as authored. Camera itself stores an orthonormal basis, from
+     * which the eye/target pair that produced it cannot be recovered uniquely,
+     * so the writer keeps the original numbers. */
+    vec3     cam_eye, cam_target;
+    ls_real  cam_fov_deg;
     vec3     grid_o, grid_u, grid_v;
     int      grid_nu, grid_nv;
     bool     has_grid;
@@ -45,5 +50,13 @@ typedef struct {
 
 bool ls_scene_load(SceneDesc *d, const char *path);
 void ls_scene_desc_free(SceneDesc *d);
+
+/* Re-emit the scene in the same format ls_scene_load reads, so an edited
+ * session round-trips, stays diffable, and can be re-run from the CLI.
+ *
+ * Emissive geometry paired to an area light is deliberately NOT written: it is
+ * regenerated on load by the same code that created it in the first place, so
+ * writing it would duplicate every area light on the next load. */
+bool ls_scene_save(const SceneDesc *d, const char *path);
 
 #endif /* LIGHTSIM_SCENEFILE_H */
