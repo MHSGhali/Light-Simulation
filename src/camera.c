@@ -1,8 +1,14 @@
 #include "lightsim/camera.h"
+#include <string.h>
 
 Camera ls_camera_look_at(vec3 eye, vec3 target, vec3 up_hint,
                          ls_real fov_y_deg, int width, int height) {
+    /* Zeroed first: every field must be set, and `ortho` in particular is a
+     * _Bool whose garbage value would make a perspective camera behave as an
+     * orthographic one at random. Adding a field to Camera must not be able to
+     * leave it uninitialised here. */
     Camera c;
+    memset(&c, 0, sizeof c);
     c.eye = eye;
     c.fwd = v3norm(v3sub(target, eye));
     c.right = v3norm(v3cross(c.fwd, up_hint));
@@ -12,6 +18,8 @@ Camera ls_camera_look_at(vec3 eye, vec3 target, vec3 up_hint,
     c.fov_y = fov_y_deg * LS_PI / 180.0;
     c.width = width;
     c.height = height;
+    c.ortho = false;
+    c.ortho_height = 0.0;
     return c;
 }
 
