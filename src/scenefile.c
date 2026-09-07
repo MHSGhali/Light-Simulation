@@ -59,22 +59,42 @@ static Spectrum parse_spd(P *p, LsSpdKind *kind, ls_real *a, ls_real *b) {
     *kind = LS_SPD_FLAT; *a = 0.0; *b = 0.0;
     char *t = tok(p);
     if (!t) { p->ok = false; return ls_spectrum_const(1.0); }
-    if (strcmp(t, "flat") == 0) return ls_spectrum_const(1.0);
-    if (strcmp(t, "blackbody") == 0) {
+    Spectrum s;
+    if (strcmp(t, "flat") == 0) {
+        s = ls_spectrum_const(1.0);
+    } else if (strcmp(t, "blackbody") == 0) {
         *kind = LS_SPD_BLACKBODY; *a = num(p);
-        return ls_spectrum_blackbody(*a);
-    }
-    if (strcmp(t, "daylight") == 0) {
+        s = ls_spectrum_blackbody(*a);
+    } else if (strcmp(t, "daylight") == 0) {
         *kind = LS_SPD_DAYLIGHT; *a = num(p);
-        return ls_spectrum_daylight(*a);
-    }
-    if (strcmp(t, "led") == 0) {
+        s = ls_spectrum_daylight(*a);
+    } else if (strcmp(t, "led") == 0) {
         *kind = LS_SPD_LED; *a = num(p); *b = num(p);
-        return ls_spectrum_gaussian(*a, *b, 1.0);
+        s = ls_spectrum_gaussian(*a, *b, 1.0);
+    } else {
+        p->ok = false;
+        snprintf(p->d->err, sizeof p->d->err, "unknown spectrum '%s'", t);
+        return ls_spectrum_const(1.0);
     }
-    p->ok = false;
-    snprintf(p->d->err, sizeof p->d->err, "unknown spectrum '%s'", t);
-    return ls_spectrum_const(1.0);
+
+    /* A shape with no power in the sampled band cannot be normalised to unit
+     * integral, and a light built from it trips the s_hat invariant inside
+     * ls_light_finalize -- an abort, with the offending number nowhere in
+     * sight. Refuse it here, where there is a directive to name. Reachable two
+     * ways: a Planckian below about 130 K, whose every visible bin underflows
+     * the float bins to zero, and an LED lobe with a non-positive width or a
+     * centre so far outside the band that even its tail underflows. */
+    if (!(ls_spectrum_integrate(&s) > 0.0)) {
+        p->ok = false;
+        if (*kind == LS_SPD_LED)
+            snprintf(p->d->err, sizeof p->d->err,
+                     "spectrum 'led %g %g' has no power in the sampled band", *a, *b);
+        else
+            snprintf(p->d->err, sizeof p->d->err,
+                     "spectrum '%s %g' has no power in the sampled band", t, *a);
+        return ls_spectrum_const(1.0);
+    }
+    return s;
 }
 
 /* Reads "<W|lm> <value> <spd>" and returns radiant flux in watts. Lumens are
@@ -324,6 +344,11 @@ bool ls_scene_save(const SceneDesc *d, const char *path) {
             case LS_PRIM_DISK:
                 /* Not a parseable primitive directive today; skip rather than
                  * write something the loader would reject. */
+                break;
+            case LS_PRIM_MESH:
+                /* The `mesh` directive lands with the OBJ importer; until then
+                 * a mesh has no textual form, so skip it rather than write
+                 * something that would not load. */
                 break;
         }
     }

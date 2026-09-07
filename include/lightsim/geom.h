@@ -31,7 +31,10 @@ typedef enum {
     LS_PRIM_SPHERE,
     LS_PRIM_PLANE,        /* infinite plane through c with normal n */
     LS_PRIM_DISK,         /* radius r, in the plane through c with normal n */
-    LS_PRIM_QUAD          /* parallelogram: c +/- ex +/- ey (ex,ey half-edges) */
+    LS_PRIM_QUAD,         /* parallelogram: c +/- ex +/- ey (ex,ey half-edges) */
+    LS_PRIM_MESH          /* triangle soup; the geometry lives in Scene.meshes,
+                           * named by mesh_id. See mesh.h for why it cannot live
+                           * in this struct. */
 } PrimKind;
 
 typedef struct {
@@ -42,6 +45,11 @@ typedef struct {
     ls_real  r;           /* sphere / disk radius */
     int      mat_id;
     int      light_id;
+    /* MESH only: index into Scene.meshes, and -1 for every other kind. For a
+     * mesh, c/n/ex/ey are reused as the placement -- c translates and
+     * (ex, ey, n) is an ORTHONORMAL object-to-world basis -- so a mesh rotates
+     * through exactly the code a quad already rotates through. */
+    int      mesh_id;
 } Prim;
 
 /* Surface area of the primitive; 0 for an infinite plane. */

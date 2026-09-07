@@ -206,6 +206,10 @@ bool ls_scene_rotate_prim(SceneDesc *d, int index, vec3 axis, ls_real angle) {
     Prim *p = &d->prims[index];
     vec3 a = v3norm(axis);
     switch (p->kind) {
+        /* A mesh turns by exactly the same three vectors: for it they are an
+         * orthonormal object-to-world basis rather than half-edges plus a
+         * normal, and a rotation preserves orthonormality either way. */
+        case LS_PRIM_MESH:
         case LS_PRIM_QUAD:
             p->ex = v3rotate(p->ex, a, angle);
             p->ey = v3rotate(p->ey, a, angle);

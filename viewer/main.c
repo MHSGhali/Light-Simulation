@@ -545,6 +545,54 @@ static void pick_at(App *a, const Camera *cam, int mx, int my) {
     a->sel_prim = -1;
 }
 
+/* The primitive that IS the current selection: a part, or an area light's own
+ * emissive face. -1 when the selection has no geometry (a point or spot). */
+static int selection_prim(const App *a) {
+    if (a->sel_light >= 0) return ls_scene_light_prim(&a->d, a->sel_light);
+    if (a->sel_prim  >= 0) return a->sel_prim;
+    return -1;
+}
+
+/* Nearest hit, ignoring one primitive.
+ *
+ * A drag slides the selection along the surface under the cursor -- but the
+ * selection's OWN surface is under the cursor too, because that is what was
+ * grabbed. Letting it answer the query makes the drag chase itself: the hit
+ * lands on the near face, the result is offset along that face's normal, which
+ * points back at the camera, and so the object advances toward the eye on every
+ * motion event for as long as the button is held. Skipping it lands the object
+ * on the surface BEHIND it, which is the surface the gesture is about. */
+static bool drag_pick(const App *a, const Ray *ray, int skip, Hit *out) {
+    Ray r = *ray;
+    Hit best;
+    bool found = false;
+    for (int i = 0; i < a->d.scene.nprims; ++i) {
+        if (i == skip) continue;
+        Hit h;
+        if (ls_prim_intersect(&a->d.scene.prims[i], i, &r, &h)) {
+            r.tmax = h.t;
+            best = h;
+            found = true;
+        }
+    }
+    if (found) *out = best;
+    return found;
+}
+
+/* Clearance between the surface under the cursor and the dragged object's
+ * CENTRE, so the object rests on that surface rather than sinking into it. A
+ * sphere is offset by its own radius, which is what placement already does. */
+static double drop_clearance(const App *a) {
+    if (a->sel_light >= 0 && a->sel_light < a->d.nlights) {
+        const Light *l = &a->d.lights[a->sel_light];
+        if (l->kind == LS_LIGHT_SPHERE) return l->radius;
+    } else if (a->sel_prim >= 0 && a->sel_prim < a->d.nprims) {
+        const Prim *p = &a->d.prims[a->sel_prim];
+        if (p->kind == LS_PRIM_SPHERE) return p->r;
+    }
+    return 0.02;
+}
+
 /* A closed polyline through world points. */
 static void overlay_loop(SDL_Renderer *ren, const App *a, const Camera *cam,
                          const vec3 *pts, int n, Col c, Uint8 alpha) {
@@ -938,6 +986,8 @@ static double scrub_value(const Field *f, double v, int dx) {
 
 static void insp_rebuild(App *a) {
     a->nfields = ls_inspect_fields(&a->d, a->sel_light, a->sel_prim,
+                                   a->st.photometric ? LS_UNITS_PHOTOMETRIC
+                                                     : LS_UNITS_RADIOMETRIC,
                                    a->tier, a->fields, LS_INSPECT_MAX);
     if (a->focus >= a->nfields) a->focus = -1;
 }
@@ -946,6 +996,13 @@ static void insp_commit(App *a, double v) {
     if (a->focus < 0 || a->focus >= a->nfields) return;
     Field *f = &a->fields[a->focus];
     if (f->readonly || f->heading) return;
+    /* A typed value is held to the same range a scrub is. Without this, a
+     * colour temperature of 2 K reaches ls_spectrum_blackbody, every visible
+     * bin underflows to zero, and the shape that cannot be normalised aborts
+     * the next ls_light_finalize -- an assert three calls away from the typing
+     * that caused it. inspect.h documents lo/hi as "clamped on set"; the scrub
+     * path kept that promise and this one did not. */
+    v = ls_clamp(v, f->lo, f->hi);
     scene_pause(a);
     bool changed = ls_inspect_set(&a->d, a->sel_light, a->sel_prim, f->id, v);
     scene_resume(a);
@@ -1499,22 +1556,16 @@ int main(int argc, char **argv) {
                 if (moving && (a.view != 2)) {
                     /* Slide along whatever surface is under the cursor: the
                      * surface IS the constraint, which keeps a 3D drag
-                     * unambiguous without axis gizmos. */
+                     * unambiguous without axis gizmos. The object's own face is
+                     * excluded from the query, or the drag walks it into the
+                     * camera -- see drag_pick. */
                     Camera cam = active_camera(&a, rw, rh);
                     Ray pr;
                     Hit hh;
                     if (view_pick_ray(&a, &cam, e.motion.x, e.motion.y, &pr) &&
-                        ls_scene_intersect(&a.d.scene, &pr, &hh)) {
+                        drag_pick(&a, &pr, selection_prim(&a), &hh)) {
                         vec3 ng = hh.backface ? v3neg(hh.ng) : hh.ng;
-                        vec3 np = v3add(hh.p, v3scale(ng, 0.02));
-                        scene_pause(&a);
-                        if (a.sel_light >= 0) {
-                            a.d.lights[a.sel_light].p = np;
-                            ls_scene_update_light(&a.d, a.sel_light);
-                        } else if (a.sel_prim >= 0) {
-                            a.d.prims[a.sel_prim].c = np;
-                        }
-                        scene_resume(&a);
+                        move_selection(&a, v3add(hh.p, v3scale(ng, drop_clearance(&a))));
                     }
                     pending = false;
                 }

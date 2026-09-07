@@ -16,22 +16,12 @@ static void spectrum_to_tint(const Spectrum *s, double rgb[3]) {
     rgb[2] = ls_clamp(c.b / m, 0.0, 1.0);
 }
 
-/* A reflectance shown as a display colour.
- *
- * A reflectance is not an emitter: it has no colour until something shines on
- * it. Pushing rho straight through XYZ implicitly views it under an
- * equal-energy illuminant, and since sRGB's white point is D65 that renders a
- * neutral grey as noticeably warm. Viewing it under D65 and normalising by
- * that illuminant's own luminance is the correct reduction, and it sends a
- * flat rho of 0.8 to exactly (0.8, 0.8, 0.8). */
+/* A reflectance as a display colour, clamped into the sRGB gamut for Blender.
+ * The reduction itself lives in color.c, paired with its inverse
+ * (ls_spectrum_from_rgb_reflectance) so the export and import directions cannot
+ * drift apart. */
 static void albedo_to_rgb(const Spectrum *rho, double rgb[3]) {
-    Spectrum d65 = ls_spectrum_daylight(6504.0);
-    Spectrum seen = ls_spectrum_mul(*rho, d65);
-    XYZ c = ls_spectrum_to_xyz(&seen);
-    XYZ w = ls_spectrum_to_xyz(&d65);
-    if (w.y <= 0.0) { rgb[0] = rgb[1] = rgb[2] = 0.0; return; }
-    XYZ norm = { c.x / w.y, c.y / w.y, c.z / w.y };
-    RGB o = ls_xyz_to_linear_srgb(norm);
+    RGB o = ls_rgb_from_spectrum_reflectance(rho);
     rgb[0] = ls_clamp(o.r, 0.0, 1.0);
     rgb[1] = ls_clamp(o.g, 0.0, 1.0);
     rgb[2] = ls_clamp(o.b, 0.0, 1.0);
