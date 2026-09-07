@@ -53,6 +53,10 @@ typedef struct {
     vec3      n;           /* axis (spot, directional) or normal (disk/rect)*/
     vec3      ex, ey;      /* rect half-edge vectors                        */
     ls_real   radius;      /* sphere / disk                                 */
+    ls_real   beam_k;      /* cosine-power beam exponent; 0 => cone model.
+                            * I(theta) = I0 cos^k(theta), which is what real
+                            * reflector optics actually do. See the note on
+                            * ls_light_k_from_beam_angle. */
     ls_real   cos_total;   /* spot outer cone                               */
     ls_real   cos_falloff; /* spot inner cone; == cos_total for a hard edge  */
     ls_real   omega_eff;   /* spot: integral of the falloff over the sphere  */
@@ -103,6 +107,32 @@ void ls_light_finalize(Light *l, int index);
 /* Total radiant flux implied by the light's geometry and radiance. Used by
  * finalize's self-check and by the tests. */
 ls_real ls_light_emitted_flux(const Light *l);
+
+/* Beam-angle parameterisation, for luminaires specified the way datasheets
+ * specify them.
+ *
+ * A datasheet gives the BEAM angle -- the full angle at which intensity has
+ * fallen to 50% of peak -- and often the FIELD angle, at 10%. The engine's
+ * smoothstep cone cannot represent those pairs at all: solving it for a 24
+ * degree beam with a 45 degree field needs cos_falloff = 1.067, which is not a
+ * cosine. The smoothstep is too gradual in cosine space; real reflectors fall
+ * off much more steeply near the axis.
+ *
+ * A cosine power does fit, and closely: 24 deg beam predicts a 43.4 deg field
+ * against a typical 45, and 40 deg predicts 71.2 against 70. It also normalises
+ * in closed form,
+ *
+ *     Omega_eff = integral cos^k dw = 2 pi / (k + 1),   I0 = Phi (k+1) / (2 pi)
+ *
+ * so ls_light_finalize's flux self-check applies to it unchanged, and k = 1
+ * recovers the Lambertian case Omega_eff = pi exactly. */
+ls_real ls_light_k_from_beam_angle(ls_real beam_deg);
+ls_real ls_light_beam_angle_from_k(ls_real k);
+/* The 10%-of-peak full angle implied by k, for display beside the beam angle. */
+ls_real ls_light_field_angle_from_k(ls_real k);
+
+/* A cosine-power beam source: position, axis, datasheet beam angle, flux. */
+Light ls_light_beam(vec3 p, vec3 dir, ls_real beam_deg, ls_real phi_e_w, Spectrum spd);
 
 /* Radiant intensity in direction `w` (unit, pointing away from the light).
  * Defined for the delta kinds; area lights return their on-axis equivalent. */

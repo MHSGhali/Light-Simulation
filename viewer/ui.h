@@ -21,12 +21,24 @@ typedef enum {
     UI_UNITS,
     UI_TRANSPORT,
     UI_QUALITY,
+    UI_TIER,
+    UI_ADD_LIGHT,
+    UI_ADD_PART,
+    UI_DUPLICATE,
+    UI_DELETE,
+    UI_UNDO,
+    UI_REDO,
     UI_SOLVE,
     UI_SAVE,
     UI_SAVE_SCENE,
     UI_BLENDER,
     UI_ACTION_COUNT
 } UiAction;
+
+/* Which placement tool is armed, if any. Arming is a toggle and the armed
+ * button lights in the same colour as a selection, so "this tool is armed" and
+ * "this object is selected" read as one visual language. */
+typedef enum { UI_TOOL_NONE = 0, UI_TOOL_LIGHT, UI_TOOL_PART } UiTool;
 
 typedef struct { int x, y, w, h; } UiRect;
 
@@ -49,13 +61,17 @@ typedef struct {
 
 /* Everything ui_apply_state needs, so ui.c never reaches into the app. */
 typedef struct {
-    bool grid_mode;              /* showing the field map rather than the render */
-    bool photometric;
-    bool direct_only;
-    bool high_quality;
-    bool solving;                /* a solve is in flight */
-    bool has_grid;               /* the scene declares a measurement grid */
-    bool has_camera;
+    bool   grid_mode;            /* showing the field map rather than the render */
+    bool   photometric;
+    bool   direct_only;
+    bool   high_quality;
+    bool   solving;              /* a solve is in flight */
+    bool   has_grid;             /* the scene declares a measurement grid */
+    bool   has_camera;
+    int    tier;                 /* 0 simple, 1 advanced, 2 scientific */
+    UiTool tool;                 /* armed placement tool */
+    bool   has_selection;
+    bool   can_undo, can_redo;
 } UiState;
 
 void ui_init(Toolbar *t);

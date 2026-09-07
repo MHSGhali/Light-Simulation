@@ -8,16 +8,17 @@ Radiance is carried as 95 bins across 360–830 nm. Photometric quantities come
 from an exact `∫ Φ(λ)·V(λ) dλ` against the CIE 1931 observer, so switching units
 re-projects one stored spectrum rather than applying a correction factor.
 
-## Build
+## Build and run
 
 ```sh
-make            # library + CLI      (no dependencies)
-make view       # interactive viewer (needs SDL2: brew install sdl2)
-make test       # validation suite
+make                     # everything: library, CLI and the viewer
+./lightsim-view          # opens an empty stage to build on
+./lightsim-view scenes/workcell.scene
 ```
 
-The CLI, the library and the tests build with no SDL2 installed; the viewer is
-the only thing that needs it.
+`make` builds the viewer whenever SDL2 is present (`brew install sdl2`) and
+quietly skips it otherwise -- the library, CLI and tests never need it.
+`make test` runs the validation suite.
 
 ## Run
 
@@ -59,19 +60,43 @@ Writes a tone-mapped PPM plus a PFM holding raw radiance in physical units.
 
 | key | action | | key | action |
 |---|---|---|---|---|
-| `1` | field map | | `S` | save PPM |
-| `2` | progressive render | | `W` | save scene (`*.edited.scene`) |
-| `U` | lux ↔ W/m² | | `B` | export Blender script |
-| `T` | full ↔ direct-only | | `R` | re-solve the field |
-| `Q` | draft ↔ fine | | `Esc` | quit |
+| `1` | field map | | `A` | add light (arms the tool) |
+| `2` | 3D render | | `P` | add part |
+| `3` | tier: simple / advanced / scientific | | `D` | duplicate |
+| `U` | lux ↔ W/m² | | `Del` | delete |
+| `T` | full ↔ direct-only | | `⌘Z` / `⌘Y` | undo / redo |
+| `Q` | draft ↔ fine | | `S` `W` `B` | save PPM / scene / Blender |
+| `R` | re-solve the field | | `Esc` | cancel, then deselect, then quit |
 
 Hover the field map to probe a point; the cross-section follows the row under
 the cursor.
 
-In render mode: **click to select** a light or a surface — the selection panel
-shows its flux in lumens, or the surface's albedo — **drag to orbit**, and
-scroll to zoom. Lights are drawn as an overlay with their extent, aim and (for
-spots) their cone, so they can be picked even when they sit behind geometry.
+### Editing
+
+In the 3D view: **click to select**, **drag the selection to move it** (it
+slides along whatever surface is under the cursor), **drag elsewhere to orbit**,
+scroll to zoom. `A` arms the add-light tool; the next click on a surface mounts
+a luminaire there, aimed away from it. `P` does the same for a part.
+
+The **inspector** on the right lists the selected object's properties. Drag a
+row sideways to scrub its value and watch the field map follow, or type a number
+and press Enter. Enum rows (type, spectrum, metal) step on click.
+
+Three tiers, cycled with `3`. They change what is shown, never what is stored:
+
+| tier | shows |
+|---|---|
+| `SIMPLE` | lumens, beam angle, colour temperature, position |
+| `ADVANCED` | emitter kind and size, aim, spectral model, surface reflectivity |
+| `SCIENTIFIC` | watts, efficacy, radiant and luminous intensity, radiance, beam exponent and its solid angle |
+
+Because flux is stored spectrally, setting 850 lm and then changing the colour
+temperature keeps the 850 lm and changes the **watts** required — at 5000 K that
+is 4.6 W, at 2700 K it is 7.5 W, which is the 112.7 lm/W efficacy of a 2700 K
+Planckian radiator.
+
+Lights are drawn as an overlay with their extent, aim and (for spots) their
+cone, so they can be picked even when they sit behind geometry.
 
 `W` writes the scene next to the one it was loaded from, as
 `<name>.edited.scene`. The original is never overwritten. The result reloads in
