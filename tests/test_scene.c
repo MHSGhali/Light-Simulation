@@ -202,6 +202,41 @@ void test_scene(void) {
         CHECK(worst < 1e-9);
         NOTE("projection round-trip over %d samples: worst error %.2e px", n, worst);
 
+        /* The same round-trip for the orthographic camera the plan view uses. */
+        double worst_o = 0.0;
+        for (int trial = 0; trial < 60; ++trial) {
+            double h = 0.4 + 3.0 * ls_rng_f(&rng);
+            vec3 tgt = v3(ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5, 0.0);
+            Camera c = ls_camera_ortho(v3add(tgt, v3(0, 0, 2.0)), tgt,
+                                       v3(0, 1, 0), h, 640, 480);
+            for (int k = 0; k < 20; ++k) {
+                double px = ls_rng_f(&rng) * 640.0, py = ls_rng_f(&rng) * 480.0;
+                Ray r = ls_camera_pick_ray(&c, px, py);
+                vec3 p = v3add(r.o, v3scale(r.d, 0.1 + 2.0 * ls_rng_f(&rng)));
+                double qx, qy;
+                CHECK(ls_camera_project(&c, p, &qx, &qy));
+                worst_o = ls_max(worst_o, ls_max(fabs(qx - px), fabs(qy - py)));
+            }
+        }
+        CHECK(worst_o < 1e-9);
+        NOTE("orthographic round-trip worst error %.2e px", worst_o);
+
+        /* The defining property of the plan view: scale does not vary with
+         * depth, so equal world distances are equal on screen wherever they
+         * sit. This is what makes measuring off it legitimate. */
+        {
+            Camera o = ls_camera_ortho(v3(0, 0, 2), v3(0, 0, 0), v3(0, 1, 0),
+                                       1.0, 400, 400);
+            double ax, ay, bx, by, cx2, cy2, dx2, dy2;
+            CHECK(ls_camera_project(&o, v3(0.0, 0, 0.0), &ax, &ay));
+            CHECK(ls_camera_project(&o, v3(0.1, 0, 0.0), &bx, &by));
+            CHECK(ls_camera_project(&o, v3(0.0, 0, 1.5), &cx2, &cy2));   /* nearer */
+            CHECK(ls_camera_project(&o, v3(0.1, 0, 1.5), &dx2, &dy2));
+            CHECK_NEAR(bx - ax, dx2 - cx2, 1e-9);
+            CHECK_NEAR(ls_camera_world_per_pixel(&o, v3(0, 0, 0)), 1.0 / 400.0, 1e-12);
+            CHECK_NEAR(ls_camera_world_per_pixel(&o, v3(0, 0, 1.9)), 1.0 / 400.0, 1e-12);
+        }
+
         /* A point behind the eye has no pixel, and must say so rather than
          * returning a plausible coordinate from a negative depth. */
         Camera c = ls_camera_look_at(v3(0, 0, 0), v3(0, 1, 0), v3(0, 0, 1), 45, 100, 100);

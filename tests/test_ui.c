@@ -41,37 +41,74 @@ void test_ui(void) {
         ui_init(&t);
         UiState s;
         memset(&s, 0, sizeof s);
-        s.has_grid = true; s.has_camera = true; s.grid_mode = true;
-        s.photometric = true;
+        s.has_grid = true; s.has_camera = true; s.view = 0;
         ui_apply_state(&t, s);
 
-        for (int i = 0; i < t.count; ++i) {
-            const UiButton *b = &t.buttons[i];
-            if (b->action == UI_MODE_GRID)   CHECK(b->active);
-            if (b->action == UI_MODE_RENDER) CHECK(!b->active);
-            /* Solving the field only means something while it is on screen. */
-            if (b->action == UI_SOLVE)       CHECK(b->enabled);
+        /* Exactly one CAMERA button is active at a time. Heat is not a third
+         * camera -- it is a different quantity shown through whichever camera
+         * is active, on every surface -- so it toggles independently. */
+        for (int v = 0; v < 2; ++v) {
+            s.view = v;
+            ui_apply_state(&t, s);
+            int active = 0;
+            for (int i = 0; i < t.count; ++i) {
+                const UiButton *b = &t.buttons[i];
+                if (b->action == UI_VIEW_3D || b->action == UI_VIEW_TOP) {
+                    if (b->active) active++;
+                    int want = (b->action == UI_VIEW_3D) ? 0 : 1;
+                    CHECK(b->active == (want == v));
+                }
+            }
+            CHECK(active == 1);
         }
 
-        /* In render mode SOLVE has nothing to do -- the render accumulates on
-         * its own -- so it must go disabled rather than silently no-op. */
-        s.grid_mode = false;
-        ui_apply_state(&t, s);
-        for (int i = 0; i < t.count; ++i)
-            if (t.buttons[i].action == UI_SOLVE) CHECK(!t.buttons[i].enabled);
+        /* The heat toggle tracks its own flag and never disables the cameras. */
+        for (int hflag = 0; hflag < 2; ++hflag) {
+            s.shade_heat = (hflag != 0);
+            ui_apply_state(&t, s);
+            for (int i = 0; i < t.count; ++i) {
+                const UiButton *b = &t.buttons[i];
+                if (b->action == UI_VIEW_HEAT) {
+                    CHECK(b->active == s.shade_heat);
+                    CHECK(b->enabled);
+                }
+                /* Placement stays available whichever quantity is on screen,
+                 * because both views still have geometry to click on. */
+                if (b->action == UI_ADD_LIGHT || b->action == UI_ADD_PART)
+                    CHECK(b->enabled);
+            }
+        }
+        s.shade_heat = false;
 
-        /* A scene with no grid cannot show the field map or export one. */
-        s.has_grid = false; s.grid_mode = false;
+        /* A scene with no measurement grid cannot export one. Heat shading is
+         * unaffected: it measures the surfaces themselves, not the grid. */
+        s.has_grid = false;
         ui_apply_state(&t, s);
         for (int i = 0; i < t.count; ++i) {
             const UiButton *b = &t.buttons[i];
-            if (b->action == UI_MODE_GRID) CHECK(!b->enabled);
             if (b->action == UI_BLENDER)   CHECK(!b->enabled);
+            if (b->action == UI_VIEW_HEAT) CHECK(b->enabled);
+        }
+
+        /* Edit actions need something selected; history needs history. */
+        s.has_grid = true; s.has_selection = false;
+        s.can_undo = false; s.can_redo = false;
+        ui_apply_state(&t, s);
+        for (int i = 0; i < t.count; ++i) {
+            const UiButton *b = &t.buttons[i];
+            if (b->action == UI_DELETE || b->action == UI_DUPLICATE) CHECK(!b->enabled);
+            if (b->action == UI_UNDO || b->action == UI_REDO)        CHECK(!b->enabled);
+        }
+        s.has_selection = true; s.can_undo = true;
+        ui_apply_state(&t, s);
+        for (int i = 0; i < t.count; ++i) {
+            const UiButton *b = &t.buttons[i];
+            if (b->action == UI_DELETE || b->action == UI_DUPLICATE) CHECK(b->enabled);
+            if (b->action == UI_UNDO) CHECK(b->enabled);
+            if (b->action == UI_REDO) CHECK(!b->enabled);
         }
 
         /* Toggle labels track the state they report. */
-        s.has_grid = true; s.grid_mode = true;
-        ui_apply_state(&t, s);
         for (int i = 0; i < t.count; ++i) {
             if (t.buttons[i].action == UI_UNITS) {
                 s.photometric = true;
@@ -84,6 +121,10 @@ void test_ui(void) {
                 CHECK(strcmp(ui_label(&t, i, s), "FULL") == 0);
                 s.direct_only = true;
                 CHECK(strcmp(ui_label(&t, i, s), "DIRECT") == 0);
+            }
+            if (t.buttons[i].action == UI_TIER) {
+                s.tier = 0; CHECK(strcmp(ui_label(&t, i, s), "SIMPLE") == 0);
+                s.tier = 2; CHECK(strcmp(ui_label(&t, i, s), "SCIENTIFIC") == 0);
             }
         }
     }

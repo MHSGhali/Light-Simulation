@@ -60,20 +60,35 @@ Writes a tone-mapped PPM plus a PFM holding raw radiance in physical units.
 
 | key | action | | key | action |
 |---|---|---|---|---|
-| `1` | field map | | `A` | add light (arms the tool) |
-| `2` | 3D render | | `P` | add part |
-| `3` | tier: simple / advanced / scientific | | `D` | duplicate |
+| `1` | 3D perspective | | `A` | add light (arms the tool) |
+| `2` | orthographic plan | | `P` | add part |
+| `3` | **illuminance shading** (toggle) | | `D` | duplicate |
 | `U` | lux ↔ W/m² | | `Del` | delete |
 | `T` | full ↔ direct-only | | `⌘Z` / `⌘Y` | undo / redo |
 | `Q` | draft ↔ fine | | `S` `W` `B` | save PPM / scene / Blender |
-| `R` | re-solve the field | | `Tab` | cycle selection |
-| `F` | drape the field on the 3D geometry | | `Esc` | cancel, then deselect, then quit |
+| `V` | tier: simple / advanced / scientific | | `Tab` | cycle selection |
+| `R` | re-solve the field | | `Esc` | cancel, then deselect, then quit |
+| `F` | drape the grid's field on the geometry | | | |
 
-**Both views are always on screen.** `1` and `2` decide which gets the larger
-pane; the other stays visible beside it. The 3D pane draws the measured field
-where it was measured — one coloured quad per measurement point, laid on the
-grid plane through the same viridis ramp as the map beside it, so the two panes
-are visibly one result rather than two pictures. `F` turns that off.
+### Views and what they show
+
+Two cameras and two quantities, chosen independently.
+
+- `1` **3D perspective** — orbit with a drag, zoom with the wheel.
+- `2` **Orthographic plan** — a true top view with no vanishing point, so equal
+  distances on screen are equal distances in the world and the picture can be
+  measured off. The eye sits just above the highest light rather than far
+  overhead: in an enclosure, looking down from outside shows only the unlit back
+  of the ceiling.
+- `3` **Illuminance shading** — instead of the radiance leaving each visible
+  point, the illuminance arriving at it, false-coloured through the same viridis
+  ramp as everything else. This applies to **every surface in the scene**, not
+  just the measurement plane, so walls, parts and luminaire bodies are all
+  measured. Hovering reads the value at whatever surface is under the cursor.
+
+Both cameras share the plan view's framing conventions, so `1` and `2` and the
+shading toggle compose freely: plan + illuminance is the classic working-plane
+study, 3D + illuminance shows how the walls and the part are lit.
 
 ### The transform gizmo
 

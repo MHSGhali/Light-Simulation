@@ -16,8 +16,9 @@
 
 typedef enum {
     UI_NONE = 0,
-    UI_MODE_GRID,
-    UI_MODE_RENDER,
+    UI_VIEW_3D,
+    UI_VIEW_TOP,
+    UI_VIEW_HEAT,
     UI_UNITS,
     UI_TRANSPORT,
     UI_QUALITY,
@@ -61,7 +62,8 @@ typedef struct {
 
 /* Everything ui_apply_state needs, so ui.c never reaches into the app. */
 typedef struct {
-    bool   grid_mode;            /* showing the field map rather than the render */
+    int    view;                 /* 0 = 3D perspective, 1 = top plan */
+    bool   shade_heat;           /* false-colour illuminance on every surface */
     bool   photometric;
     bool   direct_only;
     bool   high_quality;
