@@ -71,6 +71,50 @@ static void check_pairing(const SceneDesc *d) {
 }
 
 void test_scene(void) {
+    SECTION("camera projection is the exact inverse of the pick ray");
+    {
+        /* Picking a light that has no geometry, and drawing every overlay
+         * gizmo, both go through ls_camera_project. If it disagrees with
+         * ls_camera_pick_ray by even a pixel the markers drift off the objects
+         * they label, and picking misses at the edges of the frame -- so this
+         * is asserted at double precision rather than "close enough". */
+        Rng rng = ls_rng_seed(0x4242u, 1);
+        double worst = 0.0;
+        int n = 0;
+        for (int trial = 0; trial < 120; ++trial) {
+            double az = ls_rng_f(&rng) * LS_TWO_PI;
+            double el = (ls_rng_f(&rng) - 0.5) * 2.6;
+            double dist = 0.5 + 3.0 * ls_rng_f(&rng);
+            vec3 tgt = v3(ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5, ls_rng_f(&rng) - 0.5);
+            vec3 eye = v3add(tgt, v3(dist * cos(el) * cos(az),
+                                     dist * cos(el) * sin(az),
+                                     dist * sin(el)));
+            Camera c = ls_camera_look_at(eye, tgt, v3(0, 0, 1),
+                                         20.0 + 60.0 * ls_rng_f(&rng), 640, 480);
+            for (int k = 0; k < 20; ++k) {
+                double px = ls_rng_f(&rng) * 640.0, py = ls_rng_f(&rng) * 480.0;
+                Ray r = ls_camera_pick_ray(&c, px, py);
+                vec3 p = v3add(r.o, v3scale(r.d, 0.05 + 5.0 * ls_rng_f(&rng)));
+                double qx, qy;
+                CHECK(ls_camera_project(&c, p, &qx, &qy));
+                double e = ls_max(fabs(qx - px), fabs(qy - py));
+                if (e > worst) worst = e;
+                n++;
+            }
+        }
+        CHECK(worst < 1e-9);
+        NOTE("projection round-trip over %d samples: worst error %.2e px", n, worst);
+
+        /* A point behind the eye has no pixel, and must say so rather than
+         * returning a plausible coordinate from a negative depth. */
+        Camera c = ls_camera_look_at(v3(0, 0, 0), v3(0, 1, 0), v3(0, 0, 1), 45, 100, 100);
+        double qx, qy;
+        CHECK(!ls_camera_project(&c, v3(0, -1, 0), &qx, &qy));
+        CHECK(ls_camera_project(&c, v3(0, 1, 0), &qx, &qy));
+        CHECK_NEAR(qx, 50.0, 1e-9);
+        CHECK_NEAR(qy, 50.0, 1e-9);
+    }
+
     SECTION("scene round-trip through the writer");
     {
         SceneDesc a, b;

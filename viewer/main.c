@@ -61,6 +61,17 @@ typedef struct {
     vec3   target;
     double dist, az, el;
 
+    /* ---- selection ----
+     * Held as indices rather than flags on the objects, because a light's index
+     * IS its identity here (it is the contribution-matrix column), and removal
+     * compacts the array. -1 means nothing selected. */
+    int    sel_light;
+    int    sel_prim;
+
+    /* Canvas rect of the 3D view, in window coordinates, so picking and the
+     * overlay share one mapping with the blit. */
+    int    view_x, view_y, view_w, view_h;
+
     const char *scene_path;
 } App;
 
@@ -219,6 +230,176 @@ static void *render_thread(void *arg) {
 
 /* ------------------------------------------------------------------ main */
 
+/* ------------------------------------------------------- overlay + picking */
+
+/* Project a world point to window coordinates inside the 3D view. The render
+ * film is rw x rh and is blitted into (view_x, view_y, view_w, view_h), so the
+ * film pixel has to be scaled the same way the blit scales it -- otherwise the
+ * gizmos drift away from the pixels they annotate as the window is resized. */
+static bool project_view(const App *a, const Camera *cam, vec3 p, int *sx, int *sy) {
+    ls_real fx, fy;
+    if (!ls_camera_project(cam, p, &fx, &fy)) return false;
+    *sx = a->view_x + (int)(fx * (ls_real)a->view_w / (ls_real)cam->width);
+    *sy = a->view_y + (int)(fy * (ls_real)a->view_h / (ls_real)cam->height);
+    return true;
+}
+
+/* Window coordinates -> a pick ray through the 3D view. */
+static bool view_pick_ray(const App *a, const Camera *cam, int mx, int my, Ray *out) {
+    if (a->view_w <= 0 || a->view_h <= 0) return false;
+    int lx = mx - a->view_x, ly = my - a->view_y;
+    if (lx < 0 || ly < 0 || lx >= a->view_w || ly >= a->view_h) return false;
+    *out = ls_camera_pick_ray(cam,
+        (ls_real)lx * (ls_real)cam->width  / (ls_real)a->view_w,
+        (ls_real)ly * (ls_real)cam->height / (ls_real)a->view_h);
+    return true;
+}
+
+#define LIGHT_PICK_RADIUS 14
+
+/* Select whatever is under the cursor.
+ *
+ * Delta lights have no geometry to intersect, so they are picked by projecting
+ * their position and taking the nearest marker within a screen radius. That is
+ * tested FIRST, so a marker drawn in front of a wall wins over the wall -- if
+ * geometry were tested first, a point light would be unselectable whenever
+ * anything lay behind it. */
+static void pick_at(App *a, const Camera *cam, int mx, int my) {
+    Ray r;
+    if (!view_pick_ray(a, cam, mx, my, &r)) return;
+
+    int best = -1;
+    double best_d2 = (double)(LIGHT_PICK_RADIUS * LIGHT_PICK_RADIUS);
+    for (int i = 0; i < a->d.nlights; ++i) {
+        int sx, sy;
+        if (!project_view(a, cam, a->d.lights[i].p, &sx, &sy)) continue;
+        double dx = sx - mx, dy = sy - my, d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) { best_d2 = d2; best = i; }
+    }
+    if (best >= 0) {
+        a->sel_light = best;
+        a->sel_prim = -1;
+        printf("selected light %d\n", best);
+        return;
+    }
+
+    Hit h;
+    if (ls_scene_intersect(&a->d.scene, &r, &h)) {
+        /* A hit on an area light's own geometry selects the LIGHT, not the
+         * quad -- clicking a luminaire should give you the luminaire. */
+        if (h.light_id >= 0) { a->sel_light = h.light_id; a->sel_prim = -1;
+                               printf("selected light %d\n", h.light_id); }
+        else                 { a->sel_light = -1; a->sel_prim = h.prim_id;
+                               printf("selected surface %d\n", h.prim_id); }
+        return;
+    }
+    a->sel_light = -1;
+    a->sel_prim = -1;
+}
+
+/* A closed polyline through world points. */
+static void overlay_loop(SDL_Renderer *ren, const App *a, const Camera *cam,
+                         const vec3 *pts, int n, Col c, Uint8 alpha) {
+    int px = 0, py = 0, fx = 0, fy = 0;
+    bool have_prev = false, have_first = false;
+    for (int i = 0; i < n; ++i) {
+        int sx, sy;
+        if (!project_view(a, cam, pts[i], &sx, &sy)) { have_prev = false; continue; }
+        if (!have_first) { fx = sx; fy = sy; have_first = true; }
+        if (have_prev) draw_line(ren, px, py, sx, sy, c, alpha);
+        px = sx; py = sy; have_prev = true;
+    }
+    if (have_first && have_prev) draw_line(ren, px, py, fx, fy, c, alpha);
+}
+
+static void draw_overlay(SDL_Renderer *ren, const App *a, const Camera *cam) {
+    char buf[64];
+
+    /* The measurement grid's footprint, so its relationship to the geometry is
+     * visible in 3D rather than only in the field map. */
+    if (a->d.has_grid) {
+        vec3 o = a->d.grid_o, u = a->d.grid_u, v = a->d.grid_v;
+        vec3 corner[4] = { o, v3add(o, u), v3add(v3add(o, u), v), v3add(o, v) };
+        overlay_loop(ren, a, cam, corner, 4, COL_MUTED, 150);
+    }
+
+    for (int i = 0; i < a->d.nlights; ++i) {
+        const Light *l = &a->d.lights[i];
+        bool sel = (i == a->sel_light);
+        Col c = sel ? COL_ACCENT : COL_WARN;
+        Uint8 alpha = sel ? 255 : 170;
+
+        /* Emitting extent. */
+        if (l->kind == LS_LIGHT_RECT) {
+            vec3 q[4] = { v3add(v3add(l->p, l->ex), l->ey),
+                          v3sub(v3add(l->p, l->ex), l->ey),
+                          v3sub(v3sub(l->p, l->ex), l->ey),
+                          v3add(v3sub(l->p, l->ex), l->ey) };
+            overlay_loop(ren, a, cam, q, 4, c, alpha);
+        } else if (l->kind == LS_LIGHT_DISK || l->kind == LS_LIGHT_SPHERE) {
+            vec3 ring[24];
+            Basis b = ls_basis(l->kind == LS_LIGHT_DISK ? l->n : v3(0, 0, 1));
+            for (int k = 0; k < 24; ++k) {
+                double t = LS_TWO_PI * k / 24.0;
+                ring[k] = v3add(l->p, v3add(v3scale(b.t, l->radius * cos(t)),
+                                            v3scale(b.b, l->radius * sin(t))));
+            }
+            overlay_loop(ren, a, cam, ring, 24, c, alpha);
+        }
+
+        /* Aim, and the outer cone for a spot. */
+        if (l->kind == LS_LIGHT_SPOT || l->kind == LS_LIGHT_DIRECTIONAL
+            || l->kind == LS_LIGHT_RECT || l->kind == LS_LIGHT_DISK) {
+            double len = (l->kind == LS_LIGHT_SPOT) ? 0.25 : 0.12;
+            int x0, y0, x1, y1;
+            if (project_view(a, cam, l->p, &x0, &y0) &&
+                project_view(a, cam, v3add(l->p, v3scale(l->n, len)), &x1, &y1))
+                draw_line(ren, x0, y0, x1, y1, c, alpha);
+        }
+        if (l->kind == LS_LIGHT_SPOT) {
+            double half = acos(ls_clamp(l->cos_total, -1.0, 1.0));
+            double len = 0.4, rad = len * tan(half);
+            Basis b = ls_basis(l->n);
+            vec3 base = v3add(l->p, v3scale(l->n, len));
+            vec3 ring[20];
+            for (int k = 0; k < 20; ++k) {
+                double t = LS_TWO_PI * k / 20.0;
+                ring[k] = v3add(base, v3add(v3scale(b.t, rad * cos(t)),
+                                            v3scale(b.b, rad * sin(t))));
+            }
+            overlay_loop(ren, a, cam, ring, 20, c, alpha / 2);
+            int x0, y0, x1, y1;
+            if (project_view(a, cam, l->p, &x0, &y0))
+                for (int k = 0; k < 20; k += 5)
+                    if (project_view(a, cam, ring[k], &x1, &y1))
+                        draw_line(ren, x0, y0, x1, y1, c, alpha / 2);
+        }
+
+        int sx, sy;
+        if (project_view(a, cam, l->p, &sx, &sy)) {
+            draw_marker(ren, sx, sy, sel ? 7 : 5, c, alpha);
+            snprintf(buf, sizeof buf, "L%d", i);
+            draw_text(ren, sx + 10, sy - 4, 1, buf, c, alpha);
+        }
+    }
+
+    /* Outline the selected surface, so a material edit has a visible target. */
+    if (a->sel_prim >= 0 && a->sel_prim < a->d.nprims) {
+        const Prim *p = &a->d.prims[a->sel_prim];
+        if (p->kind == LS_PRIM_QUAD) {
+            vec3 q[4] = { v3add(v3add(p->c, p->ex), p->ey),
+                          v3sub(v3add(p->c, p->ex), p->ey),
+                          v3sub(v3sub(p->c, p->ex), p->ey),
+                          v3add(v3sub(p->c, p->ex), p->ey) };
+            overlay_loop(ren, a, cam, q, 4, COL_ACCENT, 255);
+        } else {
+            int sx, sy;
+            if (project_view(a, cam, p->c, &sx, &sy))
+                draw_marker(ren, sx, sy, 8, COL_ACCENT, 255);
+        }
+    }
+}
+
 static void save_outputs(App *a) {
     if (a->st.grid_mode) {
         int up = a->nu < 64 ? (64 + a->nu - 1) / a->nu : 1;
@@ -266,6 +447,7 @@ int main(int argc, char **argv) {
     a.st.direct_only = false;
     a.st.high_quality = want_fine;
     a.hover_i = a.hover_j = -1;
+    a.sel_light = a.sel_prim = -1;
 
     if (a.d.has_grid) {
         a.nu = a.d.grid_nu; a.nv = a.d.grid_nv;
@@ -324,6 +506,9 @@ int main(int argc, char **argv) {
     pthread_t rt;
     pthread_create(&rt, NULL, render_thread, &a);
 
+    a.view_x = cx; a.view_y = cy;
+    a.view_w = side; a.view_h = side * rh / rw;
+
     SDL_Texture *grid_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
         SDL_TEXTUREACCESS_STREAMING, a.nu > 0 ? a.nu : 1, a.nv > 0 ? a.nv : 1);
     SDL_Texture *rend_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
@@ -331,8 +516,9 @@ int main(int argc, char **argv) {
     SDL_SetTextureScaleMode(grid_tex, SDL_ScaleModeNearest);
     SDL_SetTextureScaleMode(rend_tex, SDL_ScaleModeLinear);
 
-    bool dragging = false;
-    int last_x = 0, last_y = 0;
+    bool dragging = false, pending = false;
+    int last_x = 0, last_y = 0, press_x = 0, press_y = 0;
+    const int DRAG_THRESHOLD = 4;
     bool running = true;
     char buf[128];
 
@@ -360,6 +546,11 @@ int main(int argc, char **argv) {
             }
             else if (e.type == SDL_MOUSEMOTION) {
                 a.t.hover = ui_hit_test(&a.t, e.motion.x, e.motion.y);
+                if (pending && (abs(e.motion.x - press_x) > DRAG_THRESHOLD ||
+                                abs(e.motion.y - press_y) > DRAG_THRESHOLD)) {
+                    pending = false;
+                    dragging = true;
+                }
                 if (dragging && !a.st.grid_mode) {
                     a.az -= (e.motion.x - last_x) * 0.008;
                     a.el = ls_clamp(a.el + (e.motion.y - last_y) * 0.008, -1.45, 1.45);
@@ -396,9 +587,20 @@ int main(int argc, char **argv) {
                         case UI_BLENDER:     export_blender(&a); break;
                         default: break;
                     }
-                } else if (!a.st.grid_mode) dragging = true;
+                } else if (!a.st.grid_mode) {
+                    pending = true;
+                    press_x = e.button.x; press_y = e.button.y;
+                }
             }
-            else if (e.type == SDL_MOUSEBUTTONUP) dragging = false;
+            else if (e.type == SDL_MOUSEBUTTONUP) {
+                if (pending && !a.st.grid_mode) {
+                    /* A press that never moved: select whatever is under it. */
+                    Camera cam = orbit_camera(&a, rw, rh);
+                    pick_at(&a, &cam, e.button.x, e.button.y);
+                }
+                pending = false;
+                dragging = false;
+            }
             else if (e.type == SDL_MOUSEWHEEL && !a.st.grid_mode) {
                 a.dist *= (e.wheel.y > 0) ? 0.9 : 1.111;
                 atomic_store(&a.restart, 1);
@@ -451,13 +653,17 @@ int main(int argc, char **argv) {
             pthread_mutex_lock(&a.lock);
             SDL_UpdateTexture(rend_tex, NULL, a.rgb, rw * 3);
             pthread_mutex_unlock(&a.lock);
-            int dw = side, dh = side * rh / rw;
-            SDL_Rect dst = { cx, cy, dw, dh };
+            int dw = a.view_w, dh = a.view_h;
+            SDL_Rect dst = { a.view_x, a.view_y, dw, dh };
             SDL_RenderCopy(ren, rend_tex, NULL, &dst);
-            draw_rect_line(ren, cx, cy, dw, dh, COL_RULE, 255);
-            snprintf(buf, sizeof buf, "%d PASSES  %d SPP  DRAG TO ORBIT  WHEEL TO ZOOM",
+            draw_rect_line(ren, a.view_x, a.view_y, dw, dh, COL_RULE, 255);
+
+            Camera cam = orbit_camera(&a, rw, rh);
+            draw_overlay(ren, &a, &cam);
+
+            snprintf(buf, sizeof buf, "%d PASSES  %d SPP  CLICK TO SELECT  DRAG TO ORBIT",
                      atomic_load(&a.passes), atomic_load(&a.passes) * 4);
-            draw_text(ren, cx, cy + dh + 12, 1, buf, COL_MUTED, 255);
+            draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_MUTED, 255);
         }
 
         /* ---- statistics ---- */
@@ -488,7 +694,8 @@ int main(int argc, char **argv) {
         int py = sy + 262;
         draw_rect_fill(ren, sx, py, STATS_W, 92, COL_PANEL, 255);
         draw_rect_line(ren, sx, py, STATS_W, 92, COL_RULE, 255);
-        draw_text(ren, sx + 14, py + 14, 1, "PROBE", COL_ACCENT, 255);
+        draw_text(ren, sx + 14, py + 14, 1,
+                  a.st.grid_mode ? "PROBE" : "SELECTION", COL_ACCENT, 255);
         if (a.have_hover) {
             int k = a.hover_j * a.nu + a.hover_i;
             double fu = (a.hover_i + 0.5) / a.nu, fv = (a.hover_j + 0.5) / a.nv;
@@ -499,9 +706,30 @@ int main(int argc, char **argv) {
             snprintf(buf, sizeof buf, a.disp[k] >= 100 ? "%.0f" : "%.3f", a.disp[k]);
             draw_text(ren, sx + 14, py + 52, 3, buf, COL_INK, 255);
             draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, unit, COL_MUTED, 255);
+        } else if (!a.st.grid_mode && a.sel_light >= 0) {
+            /* A first cut at the inspector: what the selected source is, in the
+             * terms the SIMPLE tier will use. */
+            const Light *l = &a.d.lights[a.sel_light];
+            static const char *kind_name[] = { "POINT", "SUN", "SPOT",
+                                               "SPHERE", "DISK", "RECT" };
+            snprintf(buf, sizeof buf, "LIGHT %d  %s", a.sel_light,
+                     kind_name[l->kind]);
+            draw_text(ren, sx + 14, py + 32, 1, buf, COL_MUTED, 255);
+            Spectrum phi = ls_spectrum_scale(l->s_hat, l->phi_e);
+            snprintf(buf, sizeof buf, "%.0f", ls_photometric(&phi));
+            draw_text(ren, sx + 14, py + 50, 3, buf, COL_INK, 255);
+            draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, "LM", COL_MUTED, 255);
+        } else if (!a.st.grid_mode && a.sel_prim >= 0) {
+            snprintf(buf, sizeof buf, "SURFACE %d", a.sel_prim);
+            draw_text(ren, sx + 14, py + 32, 1, buf, COL_MUTED, 255);
+            const Prim *pr = &a.d.prims[a.sel_prim];
+            snprintf(buf, sizeof buf, "%.2f",
+                     ls_spectrum_mean(&a.d.mats[pr->mat_id].bsdf.rho));
+            draw_text(ren, sx + 14, py + 50, 3, buf, COL_INK, 255);
+            draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, "ALBEDO", COL_MUTED, 255);
         } else {
             draw_text(ren, sx + 14, py + 48, 2,
-                      a.st.grid_mode ? "HOVER THE MAP" : "FIELD MAP ONLY", COL_MUTED, 160);
+                      a.st.grid_mode ? "HOVER THE MAP" : "CLICK A LIGHT", COL_MUTED, 160);
         }
 
         /* ---- cross-section ---- */

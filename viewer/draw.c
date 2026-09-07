@@ -26,6 +26,19 @@ void draw_rect_line(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 
     SDL_RenderDrawRect(ren, &r);
 }
 
+void draw_line(SDL_Renderer *ren, int x0, int y0, int x1, int y1, Col c, Uint8 a) {
+    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, a);
+    SDL_RenderDrawLine(ren, x0, y0, x1, y1);
+}
+
+void draw_marker(SDL_Renderer *ren, int x, int y, int r, Col c, Uint8 a) {
+    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, a);
+    SDL_RenderDrawLine(ren, x - r, y, x + r, y);
+    SDL_RenderDrawLine(ren, x, y - r, x, y + r);
+    SDL_Rect box = { x - r, y - r, 2 * r, 2 * r };
+    SDL_RenderDrawRect(ren, &box);
+}
+
 void draw_text(SDL_Renderer *ren, int x, int y, int scale, const char *s, Col c, Uint8 a) {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, a);
     int pen = x;

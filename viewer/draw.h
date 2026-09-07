@@ -13,6 +13,9 @@ extern const Col COL_BG, COL_PANEL, COL_RULE, COL_INK, COL_MUTED,
 
 void draw_rect_fill(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 a);
 void draw_rect_line(SDL_Renderer *ren, int x, int y, int w, int h, Col c, Uint8 a);
+void draw_line(SDL_Renderer *ren, int x0, int y0, int x1, int y1, Col c, Uint8 a);
+/* A small cross-in-a-box marker, for objects that project to a single point. */
+void draw_marker(SDL_Renderer *ren, int x, int y, int r, Col c, Uint8 a);
 void draw_text(SDL_Renderer *ren, int x, int y, int scale, const char *s, Col c, Uint8 a);
 void draw_text_right(SDL_Renderer *ren, int right_x, int y, int scale, const char *s, Col c, Uint8 a);
 
