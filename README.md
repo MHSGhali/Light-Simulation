@@ -59,15 +59,23 @@ Writes a tone-mapped PPM plus a PFM holding raw radiance in physical units.
 
 | key | action | | key | action |
 |---|---|---|---|---|
-| `1` | field map | | `R` | re-solve |
-| `2` | progressive render | | `S` | save PPM |
+| `1` | field map | | `S` | save PPM |
+| `2` | progressive render | | `W` | save scene (`*.edited.scene`) |
 | `U` | lux ↔ W/m² | | `B` | export Blender script |
-| `T` | full ↔ direct-only | | `Esc` | quit |
-| `Q` | draft ↔ fine | | | |
+| `T` | full ↔ direct-only | | `R` | re-solve the field |
+| `Q` | draft ↔ fine | | `Esc` | quit |
 
 Hover the field map to probe a point; the cross-section follows the row under
-the cursor. In render mode, drag to orbit and scroll to zoom — the film resets
-and re-accumulates.
+the cursor.
+
+In render mode: **click to select** a light or a surface — the selection panel
+shows its flux in lumens, or the surface's albedo — **drag to orbit**, and
+scroll to zoom. Lights are drawn as an overlay with their extent, aim and (for
+spots) their cone, so they can be picked even when they sit behind geometry.
+
+`W` writes the scene next to the one it was loaded from, as
+`<name>.edited.scene`. The original is never overwritten. The result reloads in
+this tool and also runs headlessly from the CLI.
 
 ## Blender export
 
