@@ -23,12 +23,13 @@ void ui_init(Toolbar *t) {
     t->hover = -1;
     t->pressed = -1;
     int y = UI_TOP_MARGIN;
-    add(t, UI_MODE_GRID,   "FIELD MAP", "1", false, &y);
-    add(t, UI_MODE_RENDER, "RENDER",    "2", false, &y);
+    add(t, UI_VIEW_3D,     "3D VIEW",   "1", false, &y);
+    add(t, UI_VIEW_TOP,    "TOP VIEW",  "2", false, &y);
+    add(t, UI_VIEW_HEAT,   "HEAT MAP",  "3", false, &y);
     add(t, UI_UNITS,       "LUX",       "U", true,  &y);
     add(t, UI_TRANSPORT,   "FULL",      "T", false, &y);
     add(t, UI_QUALITY,     "DRAFT",     "Q", false, &y);
-    add(t, UI_TIER,        "SIMPLE",    "3", false, &y);
+    add(t, UI_TIER,        "SIMPLE",    "V", false, &y);
     add(t, UI_ADD_LIGHT,   "ADD LIGHT", "A", true,  &y);
     add(t, UI_ADD_PART,    "ADD PART",  "P", false, &y);
     add(t, UI_DUPLICATE,   "DUPLICATE", "D", false, &y);
@@ -70,13 +71,19 @@ void ui_apply_state(Toolbar *t, UiState s) {
     for (int i = 0; i < t->count; ++i) {
         UiButton *b = &t->buttons[i];
         switch (b->action) {
-            case UI_MODE_GRID:
-                b->active = s.grid_mode;
-                b->enabled = s.has_grid;
+            case UI_VIEW_3D:
+                b->active = (s.view == 0);
+                b->enabled = true;
                 break;
-            case UI_MODE_RENDER:
-                b->active = !s.grid_mode;
-                b->enabled = s.has_camera;
+            case UI_VIEW_TOP:
+                b->active = (s.view == 1);
+                b->enabled = true;
+                break;
+            case UI_VIEW_HEAT:
+                /* Not a third camera: a different quantity to show through
+                 * whichever camera is active, on every surface in the scene. */
+                b->active = s.shade_heat;
+                b->enabled = true;
                 break;
             case UI_UNITS:
                 b->active = s.photometric;
@@ -94,19 +101,20 @@ void ui_apply_state(Toolbar *t, UiState s) {
                 b->active = s.solving;
                 /* A solve only means something for the field map; the render
                  * accumulates continuously on its own. */
-                b->enabled = s.has_grid && !s.solving && s.grid_mode;
+                b->enabled = s.has_grid && !s.solving;
                 break;
             case UI_TIER:
                 b->enabled = true;
                 b->active = (s.tier > 0);
                 break;
             case UI_ADD_LIGHT:
-                /* Placement needs somewhere to click, which means the 3D view. */
-                b->enabled = s.has_camera && !s.grid_mode;
+                /* Placement needs a view you can click INTO, which the flat heat
+                 * map is not -- it has no geometry behind it to land on. */
+                b->enabled = true;
                 b->active = (s.tool == UI_TOOL_LIGHT);
                 break;
             case UI_ADD_PART:
-                b->enabled = s.has_camera && !s.grid_mode;
+                b->enabled = true;
                 b->active = (s.tool == UI_TOOL_PART);
                 break;
             case UI_DUPLICATE:

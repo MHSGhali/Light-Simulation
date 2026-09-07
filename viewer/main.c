@@ -94,6 +94,18 @@ typedef struct {
     int         drape_cap;
     bool        show_drape;
 
+    int    view;                 /* 0 = 3D perspective, 1 = top plan */
+    double top_zoom;             /* plan-view framing, 1 = fit the grid */
+
+    /* Heat shading. Not a separate view but a different thing to SHOW through
+     * whichever camera is active: instead of the radiance leaving each visible
+     * point, the illuminance arriving at it, false-coloured. That covers every
+     * surface in the scene rather than only the measurement plane. */
+    bool     shade_heat;
+    double  *heat_sum;           /* accumulated per pixel */
+    uint32_t *heat_n;
+    double   heat_lo, heat_hi;   /* current colour range, for the bar */
+
     /* ---- transform gizmo ---- */
     int    gz_active;            /* GizmoHandle, or 0 for none */
     int    gz_hover;
@@ -183,6 +195,39 @@ static void refresh_display(App *a) {
 
 /* --------------------------------------------------------------- render */
 
+/* An orthographic plan view framed on the measurement grid, with +y up and +x
+ * right -- the same orientation the heat map is drawn in, so switching between
+ * the two compares geometry against result without the picture moving. */
+static Camera top_camera(const App *a, int w, int h) {
+    vec3 c, up_hint = v3(0, 1, 0);
+    double extent;
+    if (a->d.has_grid) {
+        c = v3add(a->d.grid_o, v3scale(v3add(a->d.grid_u, a->d.grid_v), 0.5));
+        double eu = v3len(a->d.grid_u), ev = v3len(a->d.grid_v);
+        extent = eu > ev ? eu : ev;
+    } else {
+        c = v3(0, 0, 0);
+        extent = 2.0;
+    }
+    if (extent < 1e-6) extent = 1.0;
+
+    /* Height of the eye. Parking it far above the scene is the obvious choice
+     * and the wrong one: in an enclosure it looks straight at the OUTSIDE of the
+     * ceiling, which is unlit, so the plan view comes out black. Physically
+     * right, practically useless.
+     *
+     * Instead sit just above the highest light -- under any ceiling, above
+     * everything being lit -- so the plan shows the work plane, the parts and
+     * the luminaires. */
+    double top = c.z + 0.1 * extent;
+    for (int i = 0; i < a->d.nlights; ++i)
+        if (a->d.lights[i].p.z > top) top = a->d.lights[i].p.z;
+    top += 0.04 * extent;
+
+    vec3 eye = v3(c.x, c.y, top);
+    return ls_camera_ortho(eye, c, up_hint, extent * a->top_zoom, w, h);
+}
+
 static Camera orbit_camera(const App *a, int w, int h) {
     double ce = cos(a->el), se = sin(a->el);
     vec3 eye = v3add(a->target, v3(a->dist * ce * cos(a->az),
@@ -191,6 +236,13 @@ static Camera orbit_camera(const App *a, int w, int h) {
     return ls_camera_look_at(eye, a->target, v3(0, 0, 1),
                              a->d.has_camera ? a->d.camera.fov_y * 180.0 / LS_PI : 42.0,
                              w, h);
+}
+
+/* The camera the active view is looking through. Everything -- rendering,
+ * picking, the overlay and the gizmo -- goes through this, so a view change
+ * cannot leave one of them looking somewhere else. */
+static Camera active_camera(const App *a, int w, int h) {
+    return (a->view == 1) ? top_camera(a, w, h) : orbit_camera(a, w, h);
 }
 
 typedef struct { App *a; Camera cam; int spp; } RJob;
@@ -212,6 +264,91 @@ static void render_row(int y, void *user) {
             ls_film_add(&a->film, x, y, &L);
         }
     }
+}
+
+/* One row of the illuminance pass. For each pixel: find the surface the camera
+ * sees, then measure the illuminance arriving there. The expensive part is the
+ * irradiance estimate, so the per-pass sample counts are small and the result
+ * accumulates over passes exactly as the radiance render does. */
+static void heat_row(int y, void *user) {
+    RJob *r = user;
+    App *a = r->a;
+    int W = r->cam.width;
+    LsUnitSystem u = a->st.photometric ? LS_UNITS_PHOTOMETRIC : LS_UNITS_RADIOMETRIC;
+    int nd = a->st.high_quality ? 48 : 12;
+    int ni = a->st.high_quality ? 32 : 6;
+    int dep = a->st.high_quality ? 4 : 2;
+
+    for (int x = 0; x < W; ++x) {
+        size_t idx = (size_t)y * (size_t)W + (size_t)x;
+        int pass = atomic_load(&a->passes);
+        Rng rng = ls_rng_seed(0x27BB2EE687B0B0FDull,
+                              (uint64_t)((y * W + x) * 131 + pass) + 1);
+        Ray ray = ls_camera_ray(&r->cam, x, y, ls_rng_f(&rng), ls_rng_f(&rng));
+        Hit h;
+        if (!ls_scene_intersect(&a->d.scene, &ray, &h)) continue;   /* background */
+
+        /* Measure on the side the camera can see. */
+        vec3 n = h.backface ? v3neg(h.ng) : h.ng;
+        SpectrumAcc acc;
+        ls_estimate_irradiance_full(&a->d.scene, h.p, n, nd, ni, dep, &rng, &acc, NULL);
+        Spectrum E = ls_acc_mean(&acc, 1);
+        a->heat_sum[idx] += ls_quantity_value(&E, u);
+        a->heat_n[idx]++;
+    }
+}
+
+/* Colour the accumulated illuminance through the same viridis ramp the field
+ * map uses. The range comes from robust percentiles of the pixels that actually
+ * hit something, so a single blown-out highlight cannot flatten the rest. */
+static void heat_colour(App *a) {
+    int W = a->film.width, H = a->film.height;
+    size_t np = (size_t)W * (size_t)H;
+
+    double *vals = malloc(np * sizeof *vals);
+    if (!vals) return;
+    size_t nv = 0;
+    for (size_t i = 0; i < np; ++i)
+        if (a->heat_n[i] > 0) vals[nv++] = a->heat_sum[i] / a->heat_n[i];
+    if (nv == 0) { free(vals); return; }
+
+    double lo = vals[0], hi = vals[0];
+    for (size_t i = 1; i < nv; ++i) {
+        if (vals[i] < lo) lo = vals[i];
+        if (vals[i] > hi) hi = vals[i];
+    }
+    if (hi > lo) {
+        int hist[512] = { 0 };
+        for (size_t i = 0; i < nv; ++i) {
+            int b = (int)((vals[i] - lo) / (hi - lo) * 511.0);
+            hist[b < 0 ? 0 : (b > 511 ? 511 : b)]++;
+        }
+        size_t want_lo = (size_t)((double)nv * 0.02), want_hi = (size_t)((double)nv * 0.98);
+        size_t run = 0;
+        int b0 = 0, b1 = 511;
+        for (int b = 0; b < 512; ++b) { run += (size_t)hist[b]; if (run >= want_lo) { b0 = b; break; } }
+        run = 0;
+        for (int b = 0; b < 512; ++b) { run += (size_t)hist[b]; if (run >= want_hi) { b1 = b; break; } }
+        double nlo = lo + (hi - lo) * b0 / 511.0;
+        double nhi = lo + (hi - lo) * b1 / 511.0;
+        if (nhi > nlo) { lo = nlo; hi = nhi; }
+    }
+    free(vals);
+    if (hi <= lo) hi = lo + 1.0;
+    a->heat_lo = lo;
+    a->heat_hi = hi;
+
+    pthread_mutex_lock(&a->lock);
+    for (size_t i = 0; i < np; ++i) {
+        if (a->heat_n[i] == 0) {
+            a->rgb[i*3+0] = 12; a->rgb[i*3+1] = 16; a->rgb[i*3+2] = 18;
+            continue;
+        }
+        Uint8 r, g, b;
+        draw_viridis((a->heat_sum[i] / a->heat_n[i] - lo) / (hi - lo), &r, &g, &b);
+        a->rgb[i*3+0] = r; a->rgb[i*3+1] = g; a->rgb[i*3+2] = b;
+    }
+    pthread_mutex_unlock(&a->lock);
 }
 
 static void tonemap(App *a) {
@@ -273,13 +410,22 @@ static void *render_thread(void *arg) {
             size_t np = (size_t)a->film.width * (size_t)a->film.height;
             memset(a->film.pix, 0, np * sizeof *a->film.pix);
             memset(a->film.n,   0, np * sizeof *a->film.n);
+            if (a->heat_sum) memset(a->heat_sum, 0, np * sizeof *a->heat_sum);
+            if (a->heat_n)   memset(a->heat_n,   0, np * sizeof *a->heat_n);
             atomic_store(&a->passes, 0);
             a->exposure = 0.0;
         }
-        RJob job = { a, orbit_camera(a, a->film.width, a->film.height), 4 };
-        ls_parallel_for(a->film.height, 0, render_row, &job);
-        atomic_fetch_add(&a->passes, 1);
-        tonemap(a);
+        RJob job = { a, (a->view == 1) ? top_camera(a, a->film.width, a->film.height)
+                                       : orbit_camera(a, a->film.width, a->film.height), 4 };
+        if (a->shade_heat) {
+            ls_parallel_for(a->film.height, 0, heat_row, &job);
+            atomic_fetch_add(&a->passes, 1);
+            heat_colour(a);
+        } else {
+            ls_parallel_for(a->film.height, 0, render_row, &job);
+            atomic_fetch_add(&a->passes, 1);
+            tonemap(a);
+        }
     }
     return NULL;
 }
@@ -590,10 +736,8 @@ static bool gizmo_center(const App *a, vec3 *c) {
 /* World length that projects to GIZMO_PX window pixels at the gizmo's depth, so
  * the handles stay the same size on screen however far away the object is. */
 static double gizmo_scale(const App *a, const Camera *cam, vec3 c) {
-    double z = v3dot(v3sub(c, cam->eye), cam->fwd);
-    if (z < 1e-4) z = 1e-4;
     double px_film = GIZMO_PX * (double)cam->width / (double)(a->view_w > 0 ? a->view_w : 1);
-    return px_film * z * 2.0 * tan(0.5 * cam->fov_y) / (double)cam->height;
+    return px_film * ls_camera_world_per_pixel(cam, c);
 }
 
 /* Distance in window pixels from (mx,my) to the projected segment ab. */
@@ -767,7 +911,7 @@ static void gizmo_drag(App *a, const Camera *cam, int mx, int my) {
 
 static void insp_rect(const App *a, int *x, int *y, int *w, int *h) {
     *x = WIN_W - STATS_W - 12;
-    *y = 44 + INSP_TOP + (a->st.grid_mode ? 100 : 0);
+    *y = 44 + INSP_TOP + ((a->view == 2) ? 100 : 0);
     *w = STATS_W;
     *h = (WIN_H - PLOT_H - 26) - *y;
 }
@@ -823,7 +967,7 @@ static void insp_draw(SDL_Renderer *ren, const App *a) {
 
     if (a->nfields == 0) {
         draw_text(ren, x + 14, y + 40, 1,
-                  a->st.grid_mode ? "SWITCH TO RENDER TO EDIT" : "CLICK A LIGHT OR PART",
+                  (a->view == 2) ? "SWITCH TO RENDER TO EDIT" : "CLICK A LIGHT OR PART",
                   COL_MUTED, 160);
         return;
     }
@@ -1041,7 +1185,7 @@ static void app_duplicate(App *a) {
 }
 
 static void save_outputs(App *a) {
-    if (a->st.grid_mode) {
+    if (a->view == 2) {
         int up = a->nu < 64 ? (64 + a->nu - 1) / a->nu : 1;
         if (ls_write_falsecolor_ppm("out/view_field.ppm", a->disp, a->nu, a->nv,
                                     a->lo, a->hi, up))
@@ -1080,25 +1224,31 @@ int main(int argc, char **argv) {
     const char *scene_arg = NULL;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            printf("usage: %s [scene.scene] [--render|--field] [--fine]\n\n", argv[0]);
+            printf("usage: %s [scene.scene] [--3d|--top|--heat] [--fine]\n\n", argv[0]);
             printf("  With no scene file, opens an empty stage to build on.\n\n");
-            printf("  1 field map      A add light      ^Z undo    S save PPM\n");
-            printf("  2 3D render      P add part       ^Y redo    W save scene\n");
-            printf("  3 tier           D duplicate      R re-solve B export Blender\n");
-            printf("  U lux/watt       DEL delete       Q draft/fine\n");
-    printf("  F drape the measured field on the 3D geometry   TAB cycle selection\n");
-            printf("  T full/direct    Esc cancel, then clear selection, then quit\n\n");
-            printf("  Click to select. Drag the selection to move it, drag elsewhere\n");
-            printf("  to orbit. In the inspector, drag a row to scrub or type a value.\n");
+            printf("  VIEW    1 3D perspective   2 orthographic plan\n");
+    printf("  SHOW    3 illuminance on every surface (toggle)\n");
+            printf("  EDIT    A add light   P add part   D duplicate   DEL delete\n");
+            printf("          TAB cycle selection   ^Z undo   ^Y redo\n");
+            printf("          U lux/watt   T full/direct   Q draft/fine\n");
+            printf("          V tier: simple / advanced / scientific\n");
+            printf("          F drape the measured field on the geometry\n");
+            printf("  FILE    R re-solve   S save PPM   W save scene   B export Blender\n");
+            printf("  ESC     cancel, then deselect, then quit\n\n");
+            printf("  Click to select. Drag the selection to move it, or use the axis\n");
+            printf("  handles and rotation rings on the gizmo. Drag elsewhere to orbit\n");
+            printf("  (3D view only). In the inspector, drag a row to scrub or type.\n");
             return 0;
         }
         if (argv[i][0] != '-' && !scene_arg) scene_arg = argv[i];
     }
-    bool want_render = false, want_fine = false;
-    for (int i = 2; i < argc; ++i) {
-        if      (!strcmp(argv[i], "--render")) want_render = true;
-        else if (!strcmp(argv[i], "--field"))  want_render = false;
-        else if (!strcmp(argv[i], "--fine"))   want_fine = true;
+    int want_view = -1;
+    bool want_fine = false;
+    for (int i = 1; i < argc; ++i) {
+        if      (!strcmp(argv[i], "--3d")   || !strcmp(argv[i], "--render")) want_view = 0;
+        else if (!strcmp(argv[i], "--top"))  want_view = 1;
+        else if (!strcmp(argv[i], "--heat") || !strcmp(argv[i], "--field"))  want_view = 2;
+        else if (!strcmp(argv[i], "--fine")) want_fine = true;
     }
     App a;
     memset(&a, 0, sizeof a);
@@ -1117,8 +1267,8 @@ int main(int argc, char **argv) {
     }
     a.st.has_grid = a.d.has_grid;
     a.st.has_camera = a.d.has_camera;
-    a.st.grid_mode = a.d.has_grid && !want_render;
-    if (!a.d.has_camera) a.st.grid_mode = true;
+    a.view = (want_view == 1) ? 1 : 0;
+    a.shade_heat = (want_view == 2);
     a.st.photometric = true;
     a.st.direct_only = false;
     a.st.high_quality = want_fine;
@@ -1128,7 +1278,12 @@ int main(int argc, char **argv) {
     a.tier = LS_TIER_SIMPLE;
     a.tool = UI_TOOL_NONE;
     a.new_kind = LS_LIGHT_RECT;
-    a.show_drape = true;
+    /* Off by default: the three views should each show a different thing --
+     * geometry in perspective, geometry in plan, and the measured field. F
+     * lays the field over either geometry view when the combination is what
+     * you want. */
+    a.show_drape = false;
+    a.top_zoom = 1.0;
 
     if (a.d.has_grid) {
         a.nu = a.d.grid_nu; a.nv = a.d.grid_nv;
@@ -1180,13 +1335,12 @@ int main(int argc, char **argv) {
 
     /* Canvas geometry. */
     int cx = UI_TOOLBAR_W + 18, cy = 44;
-    int cw = WIN_W - cx - STATS_W - 30;
-    int ch = WIN_H - cy - PLOT_H - 46 - CBAR_H;
-    int side = cw < ch ? cw : ch;
 
-    int rw = 560, rh = (int)(side > 0 ? side * 0.75 : 420);
+    int rw = 512, rh = 512;
     ls_film_init(&a.film, rw, rh);
     a.rgb = calloc((size_t)rw * (size_t)rh * 3u, 1);
+    a.heat_sum = calloc((size_t)rw * (size_t)rh, sizeof *a.heat_sum);
+    a.heat_n   = calloc((size_t)rw * (size_t)rh, sizeof *a.heat_n);
     pthread_mutex_init(&a.lock, NULL);
     atomic_store(&a.restart, 1);
     atomic_store(&a.paused, false);
@@ -1194,14 +1348,14 @@ int main(int argc, char **argv) {
     pthread_t rt;
     pthread_create(&rt, NULL, render_thread, &a);
 
-    a.view_x = cx; a.view_y = cy;
-    a.view_w = side; a.view_h = side * rh / rw;
+    /* The canvas rect is recomputed each frame with the layout; this just
+     * gives picking something sane before the first one. */
+    a.view_x = a.fmap_x = cx;
+    a.view_y = a.fmap_y = cy;
+    a.view_w = a.view_h = a.fmap_side = 400;
 
-    SDL_Texture *grid_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
-        SDL_TEXTUREACCESS_STREAMING, a.nu > 0 ? a.nu : 1, a.nv > 0 ? a.nv : 1);
     SDL_Texture *rend_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
         SDL_TEXTUREACCESS_STREAMING, rw, rh);
-    SDL_SetTextureScaleMode(grid_tex, SDL_ScaleModeNearest);
     SDL_SetTextureScaleMode(rend_tex, SDL_ScaleModeLinear);
 
     bool dragging = false, pending = false, moving = false;
@@ -1230,19 +1384,20 @@ int main(int argc, char **argv) {
                                                      { a.sel_light = a.sel_prim = -1; }
                         else running = false;
                         break;
-                    case SDLK_1: if (a.st.has_grid) a.st.grid_mode = true; break;
-                    case SDLK_2: if (a.st.has_camera) { a.st.grid_mode = false;
-                                     atomic_store(&a.restart, 1); } break;
+                    case SDLK_1: a.view = 0; atomic_store(&a.restart, 1); break;
+                    case SDLK_2: a.view = 1; atomic_store(&a.restart, 1); break;
                     case SDLK_u: a.st.photometric = !a.st.photometric; refresh_display(&a); break;
                     case SDLK_t: a.st.direct_only = !a.st.direct_only; refresh_display(&a); break;
                     case SDLK_q: a.st.high_quality = !a.st.high_quality;
-                                 if (a.st.grid_mode) { solve_grid(&a); refresh_display(&a); }
+                                 if (a.view == 2) { solve_grid(&a); refresh_display(&a); }
                                  else atomic_store(&a.restart, 1);
                                  break;
-                    case SDLK_r: if (a.st.grid_mode) { solve_grid(&a); refresh_display(&a); } break;
+                    case SDLK_r: if (a.view == 2) { solve_grid(&a); refresh_display(&a); } break;
                     case SDLK_s: save_outputs(&a); break;
                     case SDLK_w: save_scene(&a); break;
-                    case SDLK_3: a.tier = (LsTier)((a.tier + 1) % 3); break;
+                    case SDLK_3: a.shade_heat = !a.shade_heat;
+                                 atomic_store(&a.restart, 1); break;
+                    case SDLK_v: a.tier = (LsTier)((a.tier + 1) % 3); break;
                     case SDLK_f: a.show_drape = !a.show_drape; break;
                     case SDLK_TAB: {
                         /* Step through the lights, then the parts, then back to
@@ -1264,11 +1419,11 @@ int main(int argc, char **argv) {
                         a.focus = -1;
                         break;
                     }
-                    case SDLK_a: if (!a.st.grid_mode)
+                    case SDLK_a: if ((a.view != 2))
                                      a.tool = (a.tool == UI_TOOL_LIGHT)
                                             ? UI_TOOL_NONE : UI_TOOL_LIGHT;
                                  break;
-                    case SDLK_p: if (!a.st.grid_mode)
+                    case SDLK_p: if ((a.view != 2))
                                      a.tool = (a.tool == UI_TOOL_PART)
                                             ? UI_TOOL_NONE : UI_TOOL_PART;
                                  break;
@@ -1317,13 +1472,13 @@ int main(int argc, char **argv) {
             else if (e.type == SDL_MOUSEMOTION) {
                 a.t.hover = ui_hit_test(&a.t, e.motion.x, e.motion.y);
                 if (a.gz_active != GZ_NONE) {
-                    Camera gcam = orbit_camera(&a, rw, rh);
+                    Camera gcam = active_camera(&a, rw, rh);
                     gizmo_drag(&a, &gcam, e.motion.x, e.motion.y);
                     last_x = e.motion.x; last_y = e.motion.y;
                     break;
                 }
-                if (!a.st.grid_mode && !dragging && !moving && !scrubbing) {
-                    Camera gcam = orbit_camera(&a, rw, rh);
+                if ((a.view != 2) && !dragging && !moving && !scrubbing) {
+                    Camera gcam = active_camera(&a, rw, rh);
                     a.gz_hover = gizmo_pick(&a, &gcam, e.motion.x, e.motion.y);
                 } else a.gz_hover = GZ_NONE;
                 if (scrubbing && a.focus >= 0 && a.focus < a.nfields) {
@@ -1341,11 +1496,11 @@ int main(int argc, char **argv) {
                     scene_resume(&a);
                     insp_rebuild(&a);
                 }
-                if (moving && !a.st.grid_mode) {
+                if (moving && (a.view != 2)) {
                     /* Slide along whatever surface is under the cursor: the
                      * surface IS the constraint, which keeps a 3D drag
                      * unambiguous without axis gizmos. */
-                    Camera cam = orbit_camera(&a, rw, rh);
+                    Camera cam = active_camera(&a, rw, rh);
                     Ray pr;
                     Hit hh;
                     if (view_pick_ray(&a, &cam, e.motion.x, e.motion.y, &pr) &&
@@ -1369,18 +1524,20 @@ int main(int argc, char **argv) {
                     pending = false;
                     dragging = true;
                 }
-                if (dragging && !a.st.grid_mode) {
+                if (dragging && a.view == 0) {
                     a.az -= (e.motion.x - last_x) * 0.008;
                     a.el = ls_clamp(a.el + (e.motion.y - last_y) * 0.008, -1.45, 1.45);
                     atomic_store(&a.restart, 1);
                 }
                 last_x = e.motion.x; last_y = e.motion.y;
                 a.have_hover = false;
-                if (a.nu > 0 && a.fmap_side > 0) {
-                    int gx = e.motion.x - a.fmap_x, gy = e.motion.y - a.fmap_y;
-                    if (gx >= 0 && gx < a.fmap_side && gy >= 0 && gy < a.fmap_side) {
-                        a.hover_i = gx * a.nu / a.fmap_side;
-                        a.hover_j = a.nv - 1 - (gy * a.nv / a.fmap_side);
+                if (a.shade_heat && a.view_w > 0) {
+                    /* Read back the value the heat pass already measured for
+                     * this pixel, so probing any surface is free. */
+                    int gx = e.motion.x - a.view_x, gy = e.motion.y - a.view_y;
+                    if (gx >= 0 && gx < a.view_w && gy >= 0 && gy < a.view_h) {
+                        a.hover_i = gx * rw / a.view_w;
+                        a.hover_j = gy * rh / a.view_h;
                         a.have_hover = true;
                     }
                 }
@@ -1389,15 +1546,16 @@ int main(int argc, char **argv) {
                 int hit = ui_hit_test(&a.t, e.button.x, e.button.y);
                 if (hit >= 0) {
                     if (a.t.buttons[hit].enabled) switch (a.t.buttons[hit].action) {
-                        case UI_MODE_GRID:   a.st.grid_mode = true; break;
-                        case UI_MODE_RENDER: a.st.grid_mode = false;
+                        case UI_VIEW_3D:     a.view = 0; atomic_store(&a.restart, 1); break;
+                        case UI_VIEW_TOP:    a.view = 1; atomic_store(&a.restart, 1); break;
+                        case UI_VIEW_HEAT:   a.shade_heat = !a.shade_heat;
                                              atomic_store(&a.restart, 1); break;
                         case UI_UNITS:       a.st.photometric = !a.st.photometric;
                                              refresh_display(&a); break;
                         case UI_TRANSPORT:   a.st.direct_only = !a.st.direct_only;
                                              refresh_display(&a); break;
                         case UI_QUALITY:     a.st.high_quality = !a.st.high_quality;
-                                             if (a.st.grid_mode) { solve_grid(&a); refresh_display(&a); }
+                                             if (a.view == 2) { solve_grid(&a); refresh_display(&a); }
                                              else atomic_store(&a.restart, 1);
                                              break;
                         case UI_SOLVE:       solve_grid(&a); refresh_display(&a); break;
@@ -1436,8 +1594,8 @@ int main(int argc, char **argv) {
                             scrub_base = f->value;
                             scrub_moved = false;
                         }
-                    } else if (!a.st.grid_mode) {
-                        Camera gcam = orbit_camera(&a, rw, rh);
+                    } else if ((a.view != 2)) {
+                        Camera gcam = active_camera(&a, rw, rh);
                         int handle = (a.tool == UI_TOOL_NONE)
                                    ? gizmo_pick(&a, &gcam, e.button.x, e.button.y)
                                    : GZ_NONE;
@@ -1452,7 +1610,7 @@ int main(int argc, char **argv) {
                          * pressing anywhere else begins an orbit. Click to
                          * select, then drag it -- so orbiting never requires
                          * finding empty space in a closed scene. */
-                        Camera cam = orbit_camera(&a, rw, rh);
+                        Camera cam = active_camera(&a, rw, rh);
                         Ray pr;
                         if (a.sel_light >= 0 &&
                             view_pick_ray(&a, &cam, e.button.x, e.button.y, &pr)) {
@@ -1486,22 +1644,30 @@ int main(int argc, char **argv) {
                     scrubbing = false; scrub_moved = false; scrub_snapped = false;
                 }
                 if (moving) { moving = false; solve_and_refresh(&a); }
-                else if (pending && !a.st.grid_mode) {
-                    Camera cam = orbit_camera(&a, rw, rh);
+                else if (pending && (a.view != 2)) {
+                    Camera cam = active_camera(&a, rw, rh);
                     if (a.tool != UI_TOOL_NONE) app_place(&a, &cam, e.button.x, e.button.y);
                     else { pick_at(&a, &cam, e.button.x, e.button.y); a.focus = -1; }
                 }
                 pending = false;
                 dragging = false;
             }
-            else if (e.type == SDL_MOUSEWHEEL && !a.st.grid_mode) {
-                a.dist *= (e.wheel.y > 0) ? 0.9 : 1.111;
-                atomic_store(&a.restart, 1);
+            else if (e.type == SDL_MOUSEWHEEL) {
+                if (a.view == 0) {
+                    a.dist *= (e.wheel.y > 0) ? 0.9 : 1.111;
+                    atomic_store(&a.restart, 1);
+                } else if (a.view == 1) {
+                    a.top_zoom = ls_clamp(a.top_zoom * ((e.wheel.y > 0) ? 0.9 : 1.111),
+                                          0.1, 20.0);
+                    atomic_store(&a.restart, 1);
+                }
             }
         }
 
         if (a.sel_light >= 0 && a.sel_light < a.d.nlights)
             a.new_kind = a.d.lights[a.sel_light].kind;
+        a.st.view = a.view;
+        a.st.shade_heat = a.shade_heat;
         a.st.tier = (int)a.tier;
         a.st.tool = a.tool;
         a.st.has_selection = (a.sel_light >= 0 || a.sel_prim >= 0);
@@ -1519,93 +1685,62 @@ int main(int argc, char **argv) {
 
         /* ---- title ---- */
         snprintf(buf, sizeof buf, "%s", a.scene_path);
-        draw_text(ren, cx, 16, 2, a.st.grid_mode ? "FIELD MAP + 3D" : "3D + FIELD MAP",
+        draw_text(ren, cx, 16, 2,
+                  a.view == 0 ? (a.shade_heat ? "3D  ILLUMINANCE" : "3D VIEW")
+                              : (a.shade_heat ? "PLAN  ILLUMINANCE" : "TOP VIEW"),
                   COL_INK, 255);
         draw_text_right(ren, WIN_W - 18, 18, 1, buf, COL_MUTED, 255);
 
-        /* Both views are always on screen; the mode button decides which one gets
-         * the larger pane. Seeing the map beside the geometry is the point --
-         * a number on a false-colour plot means much more next to the thing it
-         * was measured on. */
+        /* One canvas, three views. The plan view and the heat map are framed
+         * identically -- same square rect, same orientation, +y up and +x right
+         * -- so switching between them compares geometry against result without
+         * the picture moving under you. */
         {
             int CW = WIN_W - cx - STATS_W - 30;
             int CH = WIN_H - cy - PLOT_H - 46 - CBAR_H;
-            int gap = 16;
-            int pw = (int)(CW * 0.56), sw = CW - pw - gap;
-            int fside, tw3;
-            if (a.st.grid_mode) {
-                fside = pw < (CH - CBAR_H - 22) ? pw : (CH - CBAR_H - 22);
-                a.fmap_x = cx; a.fmap_y = cy;
-                tw3 = sw;
-                a.view_x = cx + pw + gap; a.view_y = cy;
-            } else {
-                tw3 = pw;
-                a.view_x = cx; a.view_y = cy;
-                fside = sw < (CH - CBAR_H - 22) ? sw : (CH - CBAR_H - 22);
-                a.fmap_x = cx + pw + gap; a.fmap_y = cy;
-            }
-            a.fmap_side = fside;
-            a.view_w = tw3;
-            a.view_h = tw3 * rh / rw;
+            int fit = CW < CH ? CW : CH;
+            a.view_x = a.fmap_x = cx;
+            a.view_y = a.fmap_y = cy;
+            a.view_w = a.view_h = a.fmap_side = fit;
         }
 
-        if (a.nu > 0) {
-            int fx = a.fmap_x, fy = a.fmap_y, fside = a.fmap_side;
-            /* false-colour field */
-            unsigned char *px = malloc((size_t)a.nu * (size_t)a.nv * 3u);
-            double span = a.hi - a.lo;
-            for (int j = 0; j < a.nv; ++j)
-                for (int i = 0; i < a.nu; ++i) {
-                    int src = (a.nv - 1 - j) * a.nu + i;   /* +y up on screen */
-                    Uint8 r, g, b;
-                    draw_viridis((a.disp[src] - a.lo) / (span > 0 ? span : 1), &r, &g, &b);
-                    size_t o = ((size_t)j * (size_t)a.nu + (size_t)i) * 3u;
-                    px[o] = r; px[o+1] = g; px[o+2] = b;
-                }
-            SDL_UpdateTexture(grid_tex, NULL, px, a.nu * 3);
-            free(px);
-            SDL_Rect dst = { fx, fy, fside, fside };
-            SDL_RenderCopy(ren, grid_tex, NULL, &dst);
-            draw_rect_line(ren, fx, fy, fside, fside, COL_RULE, 255);
-
-            if (a.have_hover) {
-                int hx = fx + a.hover_i * fside / a.nu;
-                int hy = fy + (a.nv - 1 - a.hover_j) * fside / a.nv;
-                draw_rect_line(ren, hx, fy, fside / a.nu > 2 ? fside / a.nu : 2, fside,
-                               COL_ACCENT, 70);
-                draw_rect_line(ren, fx, hy, fside, fside / a.nv > 2 ? fside / a.nv : 2,
-                               COL_ACCENT, 140);
-            }
-            draw_colorbar(ren, fx, fy + fside + 12, fside, CBAR_H, a.lo, a.hi, unit);
-        }
-        if (a.d.has_camera) {
+        int side_c = a.view_w;
+        {
             pthread_mutex_lock(&a.lock);
             SDL_UpdateTexture(rend_tex, NULL, a.rgb, rw * 3);
             pthread_mutex_unlock(&a.lock);
-            int dw = a.view_w, dh = a.view_h;
-            SDL_Rect dst = { a.view_x, a.view_y, dw, dh };
+            SDL_Rect dst = { a.view_x, a.view_y, side_c, side_c };
             SDL_RenderCopy(ren, rend_tex, NULL, &dst);
-            draw_rect_line(ren, a.view_x, a.view_y, dw, dh, COL_RULE, 255);
+            draw_rect_line(ren, a.view_x, a.view_y, side_c, side_c, COL_RULE, 255);
 
             /* Gizmos for objects outside the frustum still project to a
              * coordinate, so the overlay has to be clipped to its own canvas or
              * it draws over the title bar and the panels beside it. */
-            SDL_Rect clip = { a.view_x, a.view_y, dw, dh };
+            SDL_Rect clip = { a.view_x, a.view_y, side_c, side_c };
             SDL_RenderSetClipRect(ren, &clip);
-            Camera cam = orbit_camera(&a, rw, rh);
-            if (a.show_drape) draw_field_drape(ren, &a, &cam);
+            Camera cam = active_camera(&a, rw, rh);
+            /* The drape would be redundant on top of illuminance shading, which
+             * already colours every surface by the same quantity. */
+            if (a.show_drape && !a.shade_heat) draw_field_drape(ren, &a, &cam);
             draw_overlay(ren, &a, &cam);
             gizmo_draw(ren, &a, &cam);
             SDL_RenderSetClipRect(ren, NULL);
 
+            if (a.shade_heat)
+                draw_colorbar(ren, a.view_x, a.view_y + side_c + 10, side_c, CBAR_H,
+                              a.heat_lo, a.heat_hi, unit);
+
+            int hint_y = a.view_y + side_c + (a.shade_heat ? CBAR_H + 26 : 12);
             if (a.tool != UI_TOOL_NONE) {
                 snprintf(buf, sizeof buf, "CLICK TO PLACE %s   ESC CANCELS",
                          a.tool == UI_TOOL_LIGHT ? "LIGHT" : "PART");
-                draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_ACCENT, 255);
+                draw_text(ren, a.view_x, hint_y, 1, buf, COL_ACCENT, 255);
             } else {
-                snprintf(buf, sizeof buf, "%d PASSES   CLICK SELECT   DRAG ORBIT",
-                         atomic_load(&a.passes));
-                draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_MUTED, 255);
+                snprintf(buf, sizeof buf, "%d PASSES   %s   %s",
+                         atomic_load(&a.passes),
+                         a.shade_heat ? "ILLUMINANCE ON EVERY SURFACE" : "RADIANCE",
+                         a.view == 1 ? "ORTHOGRAPHIC PLAN" : "DRAG ORBIT");
+                draw_text(ren, a.view_x, hint_y, 1, buf, COL_MUTED, 255);
             }
         }
 
@@ -1635,52 +1770,39 @@ int main(int argc, char **argv) {
 
         insp_draw(ren, &a);
 
-        /* ---- probe readout (field map only; the inspector takes over in 3D) */
+        /* ---- probe readout: only meaningful while illuminance is being shown */
         int py = sy + 208;
-        if (!a.st.grid_mode) py = -1000;
+        if (!a.shade_heat) py = -1000;
         draw_rect_fill(ren, sx, py, STATS_W, 92, COL_PANEL, 255);
         draw_rect_line(ren, sx, py, STATS_W, 92, COL_RULE, 255);
-        draw_text(ren, sx + 14, py + 14, 1,
-                  a.st.grid_mode ? "PROBE" : "SELECTION", COL_ACCENT, 255);
-        if (a.have_hover) {
-            int k = a.hover_j * a.nu + a.hover_i;
-            double fu = (a.hover_i + 0.5) / a.nu, fv = (a.hover_j + 0.5) / a.nv;
-            vec3 p = v3add(a.d.grid_o, v3add(v3scale(a.d.grid_u, fu),
-                                             v3scale(a.d.grid_v, fv)));
-            snprintf(buf, sizeof buf, "%.3f %.3f %.3f M", p.x, p.y, p.z);
-            draw_text(ren, sx + 14, py + 34, 1, buf, COL_MUTED, 255);
-            snprintf(buf, sizeof buf, a.disp[k] >= 100 ? "%.0f" : "%.3f", a.disp[k]);
-            draw_text(ren, sx + 14, py + 52, 3, buf, COL_INK, 255);
-            draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, unit, COL_MUTED, 255);
-        } else if (!a.st.grid_mode && a.sel_light >= 0) {
-            /* A first cut at the inspector: what the selected source is, in the
-             * terms the SIMPLE tier will use. */
-            const Light *l = &a.d.lights[a.sel_light];
-            static const char *kind_name[] = { "POINT", "SUN", "SPOT",
-                                               "SPHERE", "DISK", "RECT" };
-            snprintf(buf, sizeof buf, "LIGHT %d  %s", a.sel_light,
-                     kind_name[l->kind]);
-            draw_text(ren, sx + 14, py + 32, 1, buf, COL_MUTED, 255);
-            Spectrum phi = ls_spectrum_scale(l->s_hat, l->phi_e);
-            snprintf(buf, sizeof buf, "%.0f", ls_photometric(&phi));
-            draw_text(ren, sx + 14, py + 50, 3, buf, COL_INK, 255);
-            draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, "LM", COL_MUTED, 255);
-        } else if (!a.st.grid_mode && a.sel_prim >= 0) {
-            snprintf(buf, sizeof buf, "SURFACE %d", a.sel_prim);
-            draw_text(ren, sx + 14, py + 32, 1, buf, COL_MUTED, 255);
-            const Prim *pr = &a.d.prims[a.sel_prim];
-            snprintf(buf, sizeof buf, "%.2f",
-                     ls_spectrum_mean(&a.d.mats[pr->mat_id].bsdf.rho));
-            draw_text(ren, sx + 14, py + 50, 3, buf, COL_INK, 255);
-            draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, "ALBEDO", COL_MUTED, 255);
-        } else {
-            draw_text(ren, sx + 14, py + 48, 2,
-                      a.st.grid_mode ? "HOVER THE MAP" : "CLICK A LIGHT", COL_MUTED, 160);
+        draw_text(ren, sx + 14, py + 14, 1, "PROBE", COL_ACCENT, 255);
+        if (a.shade_heat && a.have_hover) {
+            size_t k = (size_t)a.hover_j * (size_t)rw + (size_t)a.hover_i;
+            if (a.hover_i >= 0 && a.hover_i < rw && a.hover_j >= 0 && a.hover_j < rh &&
+                a.heat_n[k] > 0) {
+                /* The surface point under the cursor, found the same way the
+                 * heat pass found it. */
+                Camera pcam = active_camera(&a, rw, rh);
+                Ray pr = ls_camera_pick_ray(&pcam, a.hover_i + 0.5, a.hover_j + 0.5);
+                Hit ph;
+                if (ls_scene_intersect(&a.d.scene, &pr, &ph)) {
+                    snprintf(buf, sizeof buf, "%.3f %.3f %.3f M", ph.p.x, ph.p.y, ph.p.z);
+                    draw_text(ren, sx + 14, py + 34, 1, buf, COL_MUTED, 255);
+                }
+                double v = a.heat_sum[k] / a.heat_n[k];
+                snprintf(buf, sizeof buf, v >= 100 ? "%.0f" : "%.3f", v);
+                draw_text(ren, sx + 14, py + 52, 3, buf, COL_INK, 255);
+                draw_text_right(ren, sx + STATS_W - 14, py + 58, 1, unit, COL_MUTED, 255);
+            } else {
+                draw_text(ren, sx + 14, py + 48, 2, "NO SURFACE", COL_MUTED, 160);
+            }
+        } else if (a.shade_heat) {
+            draw_text(ren, sx + 14, py + 48, 2, "HOVER A SURFACE", COL_MUTED, 160);
         }
 
         /* ---- cross-section ---- */
         int plot_y = WIN_H - PLOT_H - 14;
-        if (a.st.grid_mode && a.nu > 0) {
+        if ((a.view == 2) && a.nu > 0) {
             int j = a.have_hover ? a.hover_j : a.nv / 2;
             double *full = malloc((size_t)a.nu * sizeof *full);
             double *dir  = malloc((size_t)a.nu * sizeof *dir);
@@ -1707,13 +1829,13 @@ int main(int argc, char **argv) {
 
     atomic_store(&a.quit, true);
     pthread_join(rt, NULL);
-    SDL_DestroyTexture(grid_tex);
     SDL_DestroyTexture(rend_tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
     clear_stack(a.undo, &a.undo_n);
     clear_stack(a.redo, &a.redo_n);
+    free(a.heat_sum); free(a.heat_n);
     free(a.drape);
     free(a.g_full); free(a.g_direct); free(a.disp); free(a.other); free(a.rgb);
     ls_film_free(&a.film);
