@@ -3,27 +3,39 @@
  * Free of SDL so the field lists and the edit semantics can be exercised
  * headlessly; viewer/main.c only draws what this produces and feeds edits back.
  *
- * One set of stored values serves three audiences. The tier does not change what
- * is stored or simulated -- only which fields are shown, and in which units:
+ * TWO INDEPENDENT AXES. Conflating them was a real bug: a viewer switched to
+ * radiometric still authored its lights in lumens, because the only way to
+ * reach watts was to raise the tier.
  *
- *   SIMPLE      what is printed on an off-the-shelf luminaire: lumens, beam
+ * The TIER decides how much is revealed. It never changes what is stored or
+ * simulated:
+ *
+ *   SIMPLE      what is printed on an off-the-shelf luminaire: flux, beam
  *               angle, colour temperature, where it is.
  *   ADVANCED    the source itself: emitter kind and size, aim, the spectral
  *               model and its parameters, surface reflectivity.
- *   SCIENTIFIC  every radiometric quantity: watts, radiant and luminous
- *               intensity, radiance, the beam exponent and its solid angle.
+ *   SCIENTIFIC  everything derived: both flux systems side by side, efficacy,
+ *               radiant and luminous intensity, radiance, the beam exponent
+ *               and its solid angle.
+ *
+ * The UNIT SYSTEM decides which of the two equivalent numbers leads, at every
+ * tier: lumens and lux when photometric, watts and W/m^2 when radiometric.
+ * Editing either one is editing the same stored radiant flux -- units.h keeps
+ * the photometric value unreachable outside its own layer, so what a light
+ * holds is always watts, whichever row you typed into.
  */
 #ifndef LIGHTSIM_VIEWER_INSPECT_H
 #define LIGHTSIM_VIEWER_INSPECT_H
 
 #include "lightsim/sceneedit.h"
+#include "lightsim/units.h"
 
 typedef enum { LS_TIER_SIMPLE, LS_TIER_ADVANCED, LS_TIER_SCIENTIFIC } LsTier;
 
 typedef enum {
     FLD_NONE = 0,
     /* ---- light ---- */
-    FLD_L_KIND, FLD_L_LM, FLD_L_W,
+    FLD_L_KIND, FLD_L_LM, FLD_L_W, FLD_L_EV,
     FLD_L_BEAM, FLD_L_FIELD,
     FLD_L_CCT, FLD_L_SPD, FLD_L_LED_C, FLD_L_LED_W,
     FLD_L_X, FLD_L_Y, FLD_L_Z,
@@ -53,9 +65,10 @@ typedef struct {
 
 #define LS_INSPECT_MAX 32
 
-/* Build the visible field list for the current selection and tier.
+/* Build the visible field list for the current selection, tier and unit system.
  * `sel_light` and `sel_prim` are indices, or -1. Returns the count. */
 int ls_inspect_fields(const SceneDesc *d, int sel_light, int sel_prim,
+                      LsUnitSystem units,
                       LsTier tier, Field *out, int max);
 
 /* Apply an edit. Returns true if anything actually changed, so the caller knows

@@ -14,6 +14,8 @@ int main(void) {
     test_ui();
     test_scene();
     test_inspect();
+    test_color();
+    test_mesh();
     printf("\n-------------------------\n%d checks, %d failure%s\n",
            ls_test_count, ls_test_failures, ls_test_failures == 1 ? "" : "s");
     return ls_test_failures == 0 ? 0 : 1;

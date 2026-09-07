@@ -8,4 +8,6 @@ void test_furnace(void);
 void test_ui(void);
 void test_scene(void);
 void test_inspect(void);
+void test_color(void);
+void test_mesh(void);
 #endif

@@ -2,8 +2,9 @@
  *
  * Kept free of SDL so the field lists and the edit semantics can be checked
  * without a window. The thing most worth guarding is that one set of stored
- * values really does serve all three tiers -- the tier must change what is
- * SHOWN, never what is simulated. */
+ * values really does serve every audience: the TIER changes how much is shown
+ * and the UNIT SYSTEM changes which of two equivalent numbers leads, and
+ * neither one changes what is stored or simulated. */
 #include "test.h"
 #include "tests.h"
 #include "../viewer/inspect.h"
@@ -17,7 +18,7 @@ static int find(const Field *f, int n, FieldId id) {
 
 static double get(const SceneDesc *d, int li, LsTier t, FieldId id) {
     Field f[LS_INSPECT_MAX];
-    int n = ls_inspect_fields(d, li, -1, t, f, LS_INSPECT_MAX);
+    int n = ls_inspect_fields(d, li, -1, LS_UNITS_PHOTOMETRIC, t, f, LS_INSPECT_MAX);
     int k = find(f, n, id);
     return k >= 0 ? f[k].value : -1e30;
 }
@@ -32,9 +33,9 @@ void test_inspect(void) {
     SECTION("tiers reveal, never change");
     {
         Field f[LS_INSPECT_MAX];
-        int ns = ls_inspect_fields(&d, 0, -1, LS_TIER_SIMPLE, f, LS_INSPECT_MAX);
-        int na = ls_inspect_fields(&d, 0, -1, LS_TIER_ADVANCED, f, LS_INSPECT_MAX);
-        int nc = ls_inspect_fields(&d, 0, -1, LS_TIER_SCIENTIFIC, f, LS_INSPECT_MAX);
+        int ns = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC, LS_TIER_SIMPLE, f, LS_INSPECT_MAX);
+        int na = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC, LS_TIER_ADVANCED, f, LS_INSPECT_MAX);
+        int nc = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC, LS_TIER_SCIENTIFIC, f, LS_INSPECT_MAX);
         CHECK(ns > 0);
         CHECK(na > ns);
         CHECK(nc > na);
@@ -43,8 +44,8 @@ void test_inspect(void) {
         /* Every SIMPLE field must still be present, with the same value, at the
          * deeper tiers -- a deeper tier adds rows, it does not restate them. */
         Field s[LS_INSPECT_MAX];
-        int nsimple = ls_inspect_fields(&d, 0, -1, LS_TIER_SIMPLE, s, LS_INSPECT_MAX);
-        nc = ls_inspect_fields(&d, 0, -1, LS_TIER_SCIENTIFIC, f, LS_INSPECT_MAX);
+        int nsimple = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC, LS_TIER_SIMPLE, s, LS_INSPECT_MAX);
+        nc = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC, LS_TIER_SCIENTIFIC, f, LS_INSPECT_MAX);
         for (int i = 0; i < nsimple; ++i) {
             if (s[i].heading) continue;
             int k = find(f, nc, s[i].id);
@@ -130,7 +131,7 @@ void test_inspect(void) {
         CHECK(pi >= 0);
 
         Field f[LS_INSPECT_MAX];
-        int n = ls_inspect_fields(&d, -1, pi, LS_TIER_ADVANCED, f, LS_INSPECT_MAX);
+        int n = ls_inspect_fields(&d, -1, pi, LS_UNITS_PHOTOMETRIC, LS_TIER_ADVANCED, f, LS_INSPECT_MAX);
         CHECK(n > 0);
         CHECK(find(f, n, FLD_M_ALBEDO) >= 0);
 
@@ -148,6 +149,79 @@ void test_inspect(void) {
         /* Moving a part works. */
         CHECK(ls_inspect_set(&d, -1, pi, FLD_P_X, 0.11));
         CHECK_NEAR(d.prims[pi].c.x, 0.11, 1e-12);
+    }
+
+    SECTION("cycling the spectrum keeps s_hat normalised");
+    {
+        /* spd_a carries a different quantity per kind -- a peak wavelength in
+         * nm for an LED, a colour temperature in K for the rest -- so every
+         * kind change has to re-home it. Re-homing it only when the LED width
+         * was unset meant the second lap through LED left 4000 in a nanometre
+         * field: a Gaussian with no power in the band, unnormalisable, and an
+         * abort inside ls_light_finalize. Three laps covers every transition
+         * in both directions. */
+        for (int click = 0; click < 12; ++click) {
+            double next = (double)d.lights[0].spd_kind + 1.0;
+            if (next > 3.0) next = 0.0;
+            CHECK(ls_inspect_set(&d, 0, -1, FLD_L_SPD, next));
+            CHECK_NEAR(ls_spectrum_integrate(&d.lights[0].s_hat), 1.0, 1e-5);
+            if (d.lights[0].spd_kind == LS_SPD_LED) {
+                CHECK(d.lights[0].spd_a >= 380.0 && d.lights[0].spd_a <= 780.0);
+                CHECK(d.lights[0].spd_b > 0.0);
+            }
+        }
+    }
+
+    SECTION("units re-label, never change");
+    {
+        /* Tier and unit system are independent axes. Before they were split, the
+         * only way to author a light in watts was to raise the tier, so a viewer
+         * switched to radiometric still edited lumens. */
+        Field p[LS_INSPECT_MAX], r[LS_INSPECT_MAX];
+        int np = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC,
+                                   LS_TIER_SIMPLE, p, LS_INSPECT_MAX);
+        int nr = ls_inspect_fields(&d, 0, -1, LS_UNITS_RADIOMETRIC,
+                                   LS_TIER_SIMPLE, r, LS_INSPECT_MAX);
+
+        /* Same rows, one relabelled: lumens lead when photometric, watts when
+         * radiometric, and the row is editable either way. */
+        CHECK(np == nr);
+        CHECK(find(p, np, FLD_L_LM) >= 0 && find(p, np, FLD_L_W)  < 0);
+        CHECK(find(r, nr, FLD_L_W)  >= 0 && find(r, nr, FLD_L_LM) < 0);
+        CHECK(!r[find(r, nr, FLD_L_W)].readonly);
+
+        /* Both views of the SAME light describe one stored radiant flux. */
+        CHECK(ls_inspect_set(&d, 0, -1, FLD_L_LM, 600.0));
+        nr = ls_inspect_fields(&d, 0, -1, LS_UNITS_RADIOMETRIC,
+                               LS_TIER_SIMPLE, r, LS_INSPECT_MAX);
+        CHECK_NEAR(r[find(r, nr, FLD_L_W)].value, d.lights[0].phi_e, 1e-12);
+
+        /* Editing through the radiometric row reaches the same stored field,
+         * and the photometric view of it follows by the same efficacy. */
+        CHECK(ls_inspect_set(&d, 0, -1, FLD_L_W, 3.5));
+        CHECK_NEAR(d.lights[0].phi_e, 3.5, 1e-12);
+        Spectrum phi = ls_spectrum_scale(d.lights[0].s_hat, d.lights[0].phi_e);
+        CHECK_NEAR(get(&d, 0, LS_TIER_SIMPLE, FLD_L_LM), ls_photometric(&phi), 1e-9);
+
+        /* Scientific shows both systems whichever way the toggle is set -- that
+         * is what "scientific" means, and it is why the tier still matters. */
+        int nsp = ls_inspect_fields(&d, 0, -1, LS_UNITS_PHOTOMETRIC,
+                                    LS_TIER_SCIENTIFIC, p, LS_INSPECT_MAX);
+        int nsr = ls_inspect_fields(&d, 0, -1, LS_UNITS_RADIOMETRIC,
+                                    LS_TIER_SCIENTIFIC, r, LS_INSPECT_MAX);
+        CHECK(find(p, nsp, FLD_L_LM) >= 0 && find(p, nsp, FLD_L_W) >= 0);
+        CHECK(find(r, nsr, FLD_L_LM) >= 0 && find(r, nsr, FLD_L_W) >= 0);
+
+        /* A sun is defined by what it delivers on a plane, not by a flux, and
+         * it used to be radiometric-only at every tier. */
+        CHECK(ls_inspect_set(&d, 0, -1, FLD_L_KIND, (double)LS_LIGHT_DIRECTIONAL));
+        CHECK(ls_inspect_set(&d, 0, -1, FLD_L_EV, 500.0));
+        CHECK_NEAR(get(&d, 0, LS_TIER_SIMPLE, FLD_L_EV), 500.0, 1e-6);
+        int nd = ls_inspect_fields(&d, 0, -1, LS_UNITS_RADIOMETRIC,
+                                   LS_TIER_SIMPLE, r, LS_INSPECT_MAX);
+        CHECK(find(r, nd, FLD_L_W) >= 0);       /* W/m^2 when radiometric */
+        CHECK(find(r, nd, FLD_L_EV) < 0);
+        NOTE("sun at 500 lx stores %.6g W/m^2", d.lights[0].e_perp);
     }
 
     SECTION("formatting");

@@ -6,6 +6,10 @@ ls_real ls_prim_area(const Prim *p) {
         case LS_PRIM_DISK:   return LS_PI * p->r * p->r;
         case LS_PRIM_QUAD:   return 4.0 * v3len(v3cross(p->ex, p->ey));
         case LS_PRIM_PLANE:  return 0.0;   /* infinite */
+        /* A mesh's area is the sum of its triangles', which lives on the Mesh
+         * and cannot be reached from a Prim. Callers that need it read
+         * Mesh.area, where it is cached at build time. */
+        case LS_PRIM_MESH:   return 0.0;
     }
     return 0.0;
 }
@@ -87,6 +91,9 @@ bool ls_prim_occludes(const Prim *p, const Ray *ray) {
         case LS_PRIM_PLANE:  return hit_plane_t(p, ray, &t);
         case LS_PRIM_DISK:   return hit_disk(p, ray, &t);
         case LS_PRIM_QUAD:   return hit_quad(p, ray, &t);
+        /* Meshes need the vertex array, which a Prim does not carry; the scene
+         * dispatches them to ls_mesh_occludes instead. */
+        case LS_PRIM_MESH:   return false;
     }
     return false;
 }
