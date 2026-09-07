@@ -53,3 +53,18 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Build artifacts (anchored to the repo root: a bare `lightsim` would also
+# match the include/lightsim/ header directory)
+/build/
+/lightsim
+/run_tests
+
+# Reference papers: 75 MB of PDFs, two of them unrelated textbooks. Kept out of
+# git history deliberately -- drop this line if they should be tracked.
+/papers/
+
+/build/
+
+# Simulation outputs
+/out/
