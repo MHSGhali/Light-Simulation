@@ -26,6 +26,7 @@
 #include "lightsim/thread.h"
 #include "lightsim/export.h"
 #include "ui.h"
+#include "inspect.h"
 #include "draw.h"
 #include "font.h"
 
@@ -34,6 +35,8 @@
 #define PLOT_H 168
 #define STATS_W 268
 #define CBAR_H 14
+#define LS_UNDO_MAX 32
+#define ROW_H 17
 
 typedef struct {
     SceneDesc d;
@@ -72,6 +75,29 @@ typedef struct {
     /* Canvas rect of the 3D view, in window coordinates, so picking and the
      * overlay share one mapping with the blit. */
     int    view_x, view_y, view_w, view_h;
+
+    /* ---- editing ---- */
+    LsTier tier;
+    UiTool tool;                 /* armed placement tool */
+    LightKind new_kind;          /* what ADD LIGHT places next */
+    Field  fields[LS_INSPECT_MAX];
+    int    nfields;
+    int    focus;                /* index into fields[], or -1 */
+    char   entry[24];            /* in-progress typed value */
+    int    entry_len;
+    bool   typing;
+
+    /* Whole-scene snapshots, as in the Linkage project: one per gesture,
+     * pushed before the edit. Simple and correct at this scene size. */
+    SceneDesc undo[LS_UNDO_MAX];
+    int       undo_n;
+    SceneDesc redo[LS_UNDO_MAX];
+    int       redo_n;
+
+    /* The render thread reads the scene continuously. Mutating it from the main
+     * thread would be a data race, so the thread parks between passes on
+     * `paused` and confirms with `acked`. Nothing takes a lock per ray. */
+    atomic_bool paused, acked;
 
     const char *scene_path;
 } App;
@@ -213,6 +239,12 @@ static void tonemap(App *a) {
 static void *render_thread(void *arg) {
     App *a = arg;
     while (!atomic_load(&a->quit)) {
+        if (atomic_load(&a->paused)) {
+            atomic_store(&a->acked, true);
+            SDL_Delay(2);
+            continue;
+        }
+        atomic_store(&a->acked, false);
         if (a->st.grid_mode) { SDL_Delay(40); continue; }
         if (atomic_exchange(&a->restart, 0)) {
             size_t np = (size_t)a->film.width * (size_t)a->film.height;
@@ -227,6 +259,52 @@ static void *render_thread(void *arg) {
         tonemap(a);
     }
     return NULL;
+}
+
+/* A bare stage to build on: a floor, a measurement grid over it, a camera, and
+ * one panel overhead so the first render is not black. */
+static void make_default_scene(SceneDesc *d) {
+    memset(d, 0, sizeof *d);
+
+    Material floor_mat;
+    memset(&floor_mat, 0, sizeof floor_mat);
+    floor_mat.bsdf.kind = LS_BSDF_LAMBERT;
+    floor_mat.bsdf.rho = ls_spectrum_const(0.5);
+    int mid = ls_scene_add_material(d, floor_mat, "floor");
+
+    Prim floor_prim;
+    memset(&floor_prim, 0, sizeof floor_prim);
+    floor_prim.kind = LS_PRIM_QUAD;
+    floor_prim.c = v3(0, 0, 0);
+    floor_prim.n = v3(0, 0, 1);
+    floor_prim.ex = v3(0.5, 0, 0);
+    floor_prim.ey = v3(0, 0.5, 0);
+    floor_prim.mat_id = mid;
+    floor_prim.light_id = -1;
+    ls_scene_add_prim(d, floor_prim);
+
+    Spectrum spd = ls_spectrum_daylight(4000.0);
+    Light l = ls_light_rect(v3(0, 0, 0.7), v3(0.08, 0, 0), v3(0, -0.08, 0),
+                            ls_watts_from_lumens(800.0, &spd), spd);
+    l.spd_kind = LS_SPD_DAYLIGHT;
+    l.spd_a = 4000.0;
+    l.flux_in_lumens = true;
+    l.flux_authored = 800.0;
+    ls_scene_add_light(d, l);
+
+    d->grid_o = v3(-0.5, -0.5, 0.001);
+    d->grid_u = v3(1.0, 0, 0);
+    d->grid_v = v3(0, 1.0, 0);
+    d->grid_nu = d->grid_nv = 48;
+    d->has_grid = true;
+
+    d->cam_eye = v3(0, -1.6, 0.9);
+    d->cam_target = v3(0, 0, 0.1);
+    d->cam_fov_deg = 42.0;
+    d->camera = ls_camera_look_at(d->cam_eye, d->cam_target, v3(0, 0, 1),
+                                  d->cam_fov_deg, 480, 360);
+    d->has_camera = true;
+    ls_scene_rebuild(d);
 }
 
 /* ------------------------------------------------------------------ main */
@@ -401,6 +479,291 @@ static void draw_overlay(SDL_Renderer *ren, const App *a, const Camera *cam) {
     }
 }
 
+/* ---------------------------------------------------------- inspector ---- */
+
+/* Defined with the editing helpers below; the inspector commits through them. */
+static void scene_pause(App *a);
+static void scene_resume(App *a);
+static void solve_and_refresh(App *a);
+static void discard_last_undo(App *a);
+
+#define INSP_TOP 212
+
+static void insp_rect(const App *a, int *x, int *y, int *w, int *h) {
+    *x = WIN_W - STATS_W - 12;
+    *y = 44 + INSP_TOP + (a->st.grid_mode ? 100 : 0);
+    *w = STATS_W;
+    *h = (WIN_H - PLOT_H - 26) - *y;
+}
+
+static int insp_row_at(const App *a, int mx, int my) {
+    int x, y, w, h;
+    insp_rect(a, &x, &y, &w, &h);
+    if (mx < x || mx >= x + w || my < y + 24 || my >= y + h) return -1;
+    int i = (my - (y + 24)) / ROW_H;
+    return (i >= 0 && i < a->nfields) ? i : -1;
+}
+
+/* Move a value by a horizontal drag. A wide positive range (a flux in lumens)
+ * scrubs multiplicatively so the whole range is reachable; everything else
+ * scrubs linearly across its own span. */
+static double scrub_value(const Field *f, double v, int dx) {
+    if (f->is_enum) return v;
+    if (f->lo >= 0.0 && f->hi > 1000.0) {
+        double nv = (v > 1e-9 ? v : 1e-3) * pow(1.012, (double)dx);
+        return ls_clamp(nv, f->lo, f->hi);
+    }
+    return ls_clamp(v + (double)dx * (f->hi - f->lo) * 0.0025, f->lo, f->hi);
+}
+
+static void insp_rebuild(App *a) {
+    a->nfields = ls_inspect_fields(&a->d, a->sel_light, a->sel_prim,
+                                   a->tier, a->fields, LS_INSPECT_MAX);
+    if (a->focus >= a->nfields) a->focus = -1;
+}
+
+static void insp_commit(App *a, double v) {
+    if (a->focus < 0 || a->focus >= a->nfields) return;
+    Field *f = &a->fields[a->focus];
+    if (f->readonly || f->heading) return;
+    scene_pause(a);
+    bool changed = ls_inspect_set(&a->d, a->sel_light, a->sel_prim, f->id, v);
+    scene_resume(a);
+    if (changed) { insp_rebuild(a); solve_and_refresh(a); }
+    else discard_last_undo(a);
+}
+
+static void insp_draw(SDL_Renderer *ren, const App *a) {
+    int x, y, w, h;
+    insp_rect(a, &x, &y, &w, &h);
+    draw_rect_fill(ren, x, y, w, h, COL_PANEL, 255);
+    draw_rect_line(ren, x, y, w, h, COL_RULE, 255);
+
+    const char *title = a->sel_light >= 0 ? "LIGHT" : a->sel_prim >= 0 ? "PART" : "INSPECTOR";
+    draw_text(ren, x + 14, y + 9, 1, title, COL_ACCENT, 255);
+    const char *tier = a->tier == LS_TIER_SIMPLE ? "SIMPLE"
+                     : a->tier == LS_TIER_ADVANCED ? "ADVANCED" : "SCIENTIFIC";
+    draw_text_right(ren, x + w - 14, y + 9, 1, tier, COL_MUTED, 255);
+
+    if (a->nfields == 0) {
+        draw_text(ren, x + 14, y + 40, 1,
+                  a->st.grid_mode ? "SWITCH TO RENDER TO EDIT" : "CLICK A LIGHT OR PART",
+                  COL_MUTED, 160);
+        return;
+    }
+
+    char buf[48];
+    for (int i = 0; i < a->nfields; ++i) {
+        const Field *f = &a->fields[i];
+        int ry = y + 24 + i * ROW_H;
+        if (ry + ROW_H > y + h) break;
+
+        if (f->heading) {
+            draw_line(ren, x + 12, ry + ROW_H - 4, x + w - 12, ry + ROW_H - 4,
+                      COL_RULE, 255);
+            draw_text(ren, x + 12, ry + 3, 1, f->label, COL_MUTED, 200);
+            continue;
+        }
+        bool focused = (i == a->focus);
+        if (focused)
+            draw_rect_fill(ren, x + 6, ry - 1, w - 12, ROW_H - 1, COL_RULE, 160);
+
+        draw_text(ren, x + 12, ry + 3, 1, f->label,
+                  f->readonly ? COL_MUTED : COL_INK, f->readonly ? 190 : 255);
+
+        if (focused && a->typing) {
+            snprintf(buf, sizeof buf, "%s_", a->entry);
+            draw_text_right(ren, x + w - 12, ry + 3, 1, buf, COL_ACCENT, 255);
+        } else {
+            ls_inspect_format(f, buf, sizeof buf);
+            int vx = x + w - 12;
+            if (f->unit && f->unit[0]) {
+                draw_text_right(ren, vx, ry + 3, 1, f->unit, COL_MUTED, 170);
+                vx -= font_text_width(f->unit, 1) + 6;
+            }
+            draw_text_right(ren, vx, ry + 3, 1, buf,
+                            f->readonly ? COL_MUTED : COL_INK, 255);
+        }
+    }
+    draw_text(ren, x + 12, y + h - 14, 1, "DRAG A ROW TO SCRUB   TYPE TO SET",
+              COL_MUTED, 130);
+}
+
+/* ------------------------------------------------------------ editing ---- */
+
+/* Park the render thread so the scene can be mutated safely. Checked between
+ * passes, never inside one, so the tracing loop stays lock-free. */
+static void scene_pause(App *a) {
+    atomic_store(&a->paused, true);
+    for (int i = 0; i < 500 && !atomic_load(&a->acked); ++i) SDL_Delay(1);
+}
+static void scene_resume(App *a) {
+    atomic_store(&a->paused, false);
+    atomic_store(&a->restart, 1);
+}
+
+static void solve_and_refresh(App *a) {
+    if (!a->d.has_grid) return;
+    solve_grid(a);
+    refresh_display(a);
+}
+
+static void clear_stack(SceneDesc *st, int *n) {
+    for (int i = 0; i < *n; ++i) ls_scene_desc_free(&st[i]);
+    *n = 0;
+}
+
+static void push_snapshot(SceneDesc *st, int *n, const SceneDesc *src) {
+    if (*n >= LS_UNDO_MAX) {
+        ls_scene_desc_free(&st[0]);
+        for (int i = 1; i < LS_UNDO_MAX; ++i) st[i - 1] = st[i];
+        *n = LS_UNDO_MAX - 1;
+    }
+    if (ls_scene_clone(src, &st[*n])) (*n)++;
+}
+
+static void push_undo(App *a) {
+    push_snapshot(a->undo, &a->undo_n, &a->d);
+    clear_stack(a->redo, &a->redo_n);
+}
+
+/* Drop the most recent snapshot without restoring it, for the case where a
+ * gesture optimistically snapshotted and then turned out to change nothing. */
+static void discard_last_undo(App *a) {
+    if (a->undo_n <= 0) return;
+    a->undo_n--;
+    ls_scene_desc_free(&a->undo[a->undo_n]);
+}
+
+static void adopt(App *a, SceneDesc *restored) {
+    ls_scene_desc_free(&a->d);
+    a->d = *restored;
+    ls_scene_rebuild(&a->d);
+    if (a->sel_light >= a->d.nlights) a->sel_light = -1;
+    if (a->sel_prim  >= a->d.nprims)  a->sel_prim  = -1;
+}
+
+static void app_undo(App *a) {
+    if (a->undo_n <= 0) { printf("nothing to undo\n"); return; }
+    scene_pause(a);
+    push_snapshot(a->redo, &a->redo_n, &a->d);
+    a->undo_n--;
+    adopt(a, &a->undo[a->undo_n]);
+    scene_resume(a);
+    solve_and_refresh(a);
+    printf("undo\n");
+}
+
+static void app_redo(App *a) {
+    if (a->redo_n <= 0) { printf("nothing to redo\n"); return; }
+    scene_pause(a);
+    /* Deliberately not push_undo: redoing must not clear the redo stack. */
+    push_snapshot(a->undo, &a->undo_n, &a->d);
+    a->redo_n--;
+    adopt(a, &a->redo[a->redo_n]);
+    scene_resume(a);
+    solve_and_refresh(a);
+    printf("redo\n");
+}
+
+/* A light of the currently selected kind, sized and aimed for the surface it
+ * was dropped on. A click always produces a working luminaire rather than
+ * nothing, in the spirit of the Linkage tools. */
+static Light make_light(const App *a, vec3 p, vec3 aim) {
+    Spectrum spd = ls_spectrum_daylight(4000.0);
+    double watts = ls_watts_from_lumens(400.0, &spd);
+    Light l;
+    switch (a->new_kind) {
+        case LS_LIGHT_SPOT:
+            l = ls_light_beam(p, aim, 40.0, watts, spd); break;
+        case LS_LIGHT_POINT:
+            l = ls_light_point(p, watts, spd); break;
+        case LS_LIGHT_SPHERE:
+            l = ls_light_sphere(p, 0.03, watts, spd); break;
+        case LS_LIGHT_DISK:
+            l = ls_light_disk(p, aim, 0.05, watts, spd); break;
+        case LS_LIGHT_DIRECTIONAL:
+            l = ls_light_directional(aim, 5.0, spd); break;
+        case LS_LIGHT_RECT:
+        default: {
+            /* Build the rect's edges in the plane perpendicular to the aim, so
+             * a panel dropped on a wall lies flat against it. */
+            Basis b = ls_basis(v3neg(v3norm(aim)));
+            l = ls_light_rect(p, v3scale(b.t, 0.05), v3scale(b.b, -0.05), watts, spd);
+            break;
+        }
+    }
+    l.spd_kind = LS_SPD_DAYLIGHT;
+    l.spd_a = 4000.0;
+    l.flux_in_lumens = true;
+    l.flux_authored = 400.0;
+    return l;
+}
+
+static void app_place(App *a, const Camera *cam, int mx, int my) {
+    Ray r;
+    if (!view_pick_ray(a, cam, mx, my, &r)) return;
+    Hit h;
+    vec3 p, ng;
+    if (ls_scene_intersect(&a->d.scene, &r, &h)) {
+        ng = h.backface ? v3neg(h.ng) : h.ng;
+        p = v3add(h.p, v3scale(ng, 0.02));
+    } else {
+        /* Nothing under the cursor: drop it a little way down the ray rather
+         * than doing nothing, so a click always produces something. */
+        p = v3add(r.o, v3scale(r.d, a->dist));
+        ng = v3(0, 0, 1);
+    }
+    scene_pause(a);
+    push_undo(a);
+    if (a->tool == UI_TOOL_LIGHT) {
+        int id = ls_scene_add_light(&a->d, make_light(a, p, v3neg(ng)));
+        a->sel_light = id; a->sel_prim = -1;
+        printf("placed light %d\n", id);
+    } else {
+        Material m;
+        memset(&m, 0, sizeof m);
+        m.bsdf.kind = LS_BSDF_LAMBERT;
+        m.bsdf.rho = ls_spectrum_const(0.5);
+        char nm[32];
+        snprintf(nm, sizeof nm, "part%d", a->d.nprims);
+        int mid = ls_scene_add_material(&a->d, m, nm);
+        Prim pr;
+        memset(&pr, 0, sizeof pr);
+        pr.kind = LS_PRIM_SPHERE;
+        pr.c = v3add(p, v3scale(ng, 0.03));
+        pr.r = 0.05;
+        pr.mat_id = mid;
+        pr.light_id = -1;
+        int id = ls_scene_add_prim(&a->d, pr);
+        a->sel_prim = id; a->sel_light = -1;
+        printf("placed part %d\n", id);
+    }
+    a->tool = UI_TOOL_NONE;
+    scene_resume(a);
+    solve_and_refresh(a);
+}
+
+static void app_delete(App *a) {
+    if (a->sel_light < 0 && a->sel_prim < 0) return;
+    scene_pause(a);
+    push_undo(a);
+    if (a->sel_light >= 0) { ls_scene_remove_light(&a->d, a->sel_light); a->sel_light = -1; }
+    else                   { ls_scene_remove_prim(&a->d, a->sel_prim);   a->sel_prim = -1; }
+    scene_resume(a);
+    solve_and_refresh(a);
+}
+
+static void app_duplicate(App *a) {
+    if (a->sel_light < 0) return;
+    scene_pause(a);
+    push_undo(a);
+    int id = ls_scene_duplicate_light(&a->d, a->sel_light, v3(0.05, 0.05, 0.0));
+    if (id >= 0) a->sel_light = id;
+    scene_resume(a);
+    solve_and_refresh(a);
+}
+
 static void save_outputs(App *a) {
     if (a->st.grid_mode) {
         int up = a->nu < 64 ? (64 + a->nu - 1) / a->nu : 1;
@@ -438,9 +801,21 @@ static void export_blender(App *a) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <scene.txt> [--render|--field] [--fine]\n", argv[0]);
-        return 1;
+    const char *scene_arg = NULL;
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            printf("usage: %s [scene.scene] [--render|--field] [--fine]\n\n", argv[0]);
+            printf("  With no scene file, opens an empty stage to build on.\n\n");
+            printf("  1 field map      A add light      ^Z undo    S save PPM\n");
+            printf("  2 3D render      P add part       ^Y redo    W save scene\n");
+            printf("  3 tier           D duplicate      R re-solve B export Blender\n");
+            printf("  U lux/watt       DEL delete       Q draft/fine\n");
+            printf("  T full/direct    Esc cancel, then clear selection, then quit\n\n");
+            printf("  Click to select. Drag the selection to move it, drag elsewhere\n");
+            printf("  to orbit. In the inspector, drag a row to scrub or type a value.\n");
+            return 0;
+        }
+        if (argv[i][0] != '-' && !scene_arg) scene_arg = argv[i];
     }
     bool want_render = false, want_fine = false;
     for (int i = 2; i < argc; ++i) {
@@ -450,10 +825,18 @@ int main(int argc, char **argv) {
     }
     App a;
     memset(&a, 0, sizeof a);
-    a.scene_path = argv[1];
-    if (!ls_scene_load(&a.d, argv[1])) {
-        fprintf(stderr, "scene error: %s\n", a.d.err);
-        return 1;
+    a.scene_path = scene_arg ? scene_arg : "untitled.scene";
+    if (scene_arg) {
+        if (!ls_scene_load(&a.d, scene_arg)) {
+            fprintf(stderr, "scene error: %s\n", a.d.err);
+            return 1;
+        }
+    } else {
+        /* Launched with no file: start on an empty stage rather than refusing,
+         * so a scene can be built from nothing in the same tool. */
+        make_default_scene(&a.d);
+        printf("no scene given -- starting an empty stage. "
+               "ADD LIGHT / ADD PART to build one, SAVE SCENE to keep it.\n");
     }
     a.st.has_grid = a.d.has_grid;
     a.st.has_camera = a.d.has_camera;
@@ -464,6 +847,10 @@ int main(int argc, char **argv) {
     a.st.high_quality = want_fine;
     a.hover_i = a.hover_j = -1;
     a.sel_light = a.sel_prim = -1;
+    a.focus = -1;
+    a.tier = LS_TIER_SIMPLE;
+    a.tool = UI_TOOL_NONE;
+    a.new_kind = LS_LIGHT_RECT;
 
     if (a.d.has_grid) {
         a.nu = a.d.grid_nu; a.nv = a.d.grid_nv;
@@ -507,6 +894,7 @@ int main(int argc, char **argv) {
     SDL_RenderSetLogicalSize(ren, WIN_W, WIN_H);
 
     ui_init(&a.t);
+    SDL_StartTextInput();
 
     /* Canvas geometry. */
     int cx = UI_TOOLBAR_W + 18, cy = 44;
@@ -519,6 +907,8 @@ int main(int argc, char **argv) {
     a.rgb = calloc((size_t)rw * (size_t)rh * 3u, 1);
     pthread_mutex_init(&a.lock, NULL);
     atomic_store(&a.restart, 1);
+    atomic_store(&a.paused, false);
+    atomic_store(&a.acked, false);
     pthread_t rt;
     pthread_create(&rt, NULL, render_thread, &a);
 
@@ -532,8 +922,11 @@ int main(int argc, char **argv) {
     SDL_SetTextureScaleMode(grid_tex, SDL_ScaleModeNearest);
     SDL_SetTextureScaleMode(rend_tex, SDL_ScaleModeLinear);
 
-    bool dragging = false, pending = false;
+    bool dragging = false, pending = false, moving = false;
+    bool scrubbing = false, scrub_moved = false, scrub_snapped = false;
     int last_x = 0, last_y = 0, press_x = 0, press_y = 0;
+    int scrub_start = 0;
+    double scrub_base = 0.0;
     const int DRAG_THRESHOLD = 4;
     bool running = true;
     char buf[128];
@@ -544,7 +937,17 @@ int main(int argc, char **argv) {
             if (e.type == SDL_QUIT) running = false;
             else if (e.type == SDL_KEYDOWN) {
                 switch (e.key.keysym.sym) {
-                    case SDLK_ESCAPE: running = false; break;
+                    case SDLK_ESCAPE:
+                        /* A cancel ladder, most transient state first, so one
+                         * key backs out of whatever is in progress before it
+                         * closes the window. */
+                        if (a.typing)                { a.typing = false; a.entry_len = 0; }
+                        else if (a.tool != UI_TOOL_NONE) a.tool = UI_TOOL_NONE;
+                        else if (a.focus >= 0)       a.focus = -1;
+                        else if (a.sel_light >= 0 || a.sel_prim >= 0)
+                                                     { a.sel_light = a.sel_prim = -1; }
+                        else running = false;
+                        break;
                     case SDLK_1: if (a.st.has_grid) a.st.grid_mode = true; break;
                     case SDLK_2: if (a.st.has_camera) { a.st.grid_mode = false;
                                      atomic_store(&a.restart, 1); } break;
@@ -557,14 +960,99 @@ int main(int argc, char **argv) {
                     case SDLK_r: if (a.st.grid_mode) { solve_grid(&a); refresh_display(&a); } break;
                     case SDLK_s: save_outputs(&a); break;
                     case SDLK_w: save_scene(&a); break;
+                    case SDLK_3: a.tier = (LsTier)((a.tier + 1) % 3); break;
+                    case SDLK_a: if (!a.st.grid_mode)
+                                     a.tool = (a.tool == UI_TOOL_LIGHT)
+                                            ? UI_TOOL_NONE : UI_TOOL_LIGHT;
+                                 break;
+                    case SDLK_p: if (!a.st.grid_mode)
+                                     a.tool = (a.tool == UI_TOOL_PART)
+                                            ? UI_TOOL_NONE : UI_TOOL_PART;
+                                 break;
+                    case SDLK_d: app_duplicate(&a); break;
+                    case SDLK_DELETE:
+                    case SDLK_BACKSPACE:
+                        if (a.typing) {
+                            if (a.entry_len > 0) a.entry[--a.entry_len] = '\0';
+                        } else app_delete(&a);
+                        break;
+                    case SDLK_RETURN:
+                    case SDLK_KP_ENTER:
+                        if (a.typing && a.entry_len > 0) {
+                            scene_pause(&a); push_undo(&a); scene_resume(&a);
+                            insp_commit(&a, atof(a.entry));
+                        }
+                        a.typing = false; a.entry_len = 0; a.entry[0] = '\0';
+                        break;
+                    case SDLK_z:
+                        if (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI)) {
+                            if (SDL_GetModState() & KMOD_SHIFT) app_redo(&a);
+                            else app_undo(&a);
+                        }
+                        break;
+                    case SDLK_y:
+                        if (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI)) app_redo(&a);
+                        break;
                     case SDLK_b: export_blender(&a); break;
                     default: break;
                 }
             }
+            else if (e.type == SDL_TEXTINPUT) {
+                /* Only meaningful while a numeric row has focus. */
+                if (a.focus >= 0 && a.focus < a.nfields &&
+                    !a.fields[a.focus].readonly && !a.fields[a.focus].is_enum) {
+                    for (const char *c = e.text.text; *c; ++c) {
+                        if (!((*c >= '0' && *c <= '9') || *c == '.' || *c == '-')) continue;
+                        if (a.entry_len < (int)sizeof a.entry - 1) {
+                            a.entry[a.entry_len++] = *c;
+                            a.entry[a.entry_len] = '\0';
+                            a.typing = true;
+                        }
+                    }
+                }
+            }
             else if (e.type == SDL_MOUSEMOTION) {
                 a.t.hover = ui_hit_test(&a.t, e.motion.x, e.motion.y);
-                if (pending && (abs(e.motion.x - press_x) > DRAG_THRESHOLD ||
-                                abs(e.motion.y - press_y) > DRAG_THRESHOLD)) {
+                if (scrubbing && a.focus >= 0 && a.focus < a.nfields) {
+                    int dx = e.motion.x - scrub_start;
+                    if (dx != 0) scrub_moved = true;
+                    double nv = scrub_value(&a.fields[a.focus], scrub_base, dx);
+                    /* Snapshot once, on the first movement of the gesture. */
+                    if (scrub_moved && !scrub_snapped) {
+                        scene_pause(&a); push_undo(&a); scene_resume(&a);
+                        scrub_snapped = true;
+                    }
+                    scene_pause(&a);
+                    ls_inspect_set(&a.d, a.sel_light, a.sel_prim,
+                                   a.fields[a.focus].id, nv);
+                    scene_resume(&a);
+                    insp_rebuild(&a);
+                }
+                if (moving && !a.st.grid_mode) {
+                    /* Slide along whatever surface is under the cursor: the
+                     * surface IS the constraint, which keeps a 3D drag
+                     * unambiguous without axis gizmos. */
+                    Camera cam = orbit_camera(&a, rw, rh);
+                    Ray pr;
+                    Hit hh;
+                    if (view_pick_ray(&a, &cam, e.motion.x, e.motion.y, &pr) &&
+                        ls_scene_intersect(&a.d.scene, &pr, &hh)) {
+                        vec3 ng = hh.backface ? v3neg(hh.ng) : hh.ng;
+                        vec3 np = v3add(hh.p, v3scale(ng, 0.02));
+                        scene_pause(&a);
+                        if (a.sel_light >= 0) {
+                            a.d.lights[a.sel_light].p = np;
+                            ls_scene_update_light(&a.d, a.sel_light);
+                        } else if (a.sel_prim >= 0) {
+                            a.d.prims[a.sel_prim].c = np;
+                        }
+                        scene_resume(&a);
+                    }
+                    pending = false;
+                }
+                if (pending && !moving &&
+                    (abs(e.motion.x - press_x) > DRAG_THRESHOLD ||
+                     abs(e.motion.y - press_y) > DRAG_THRESHOLD)) {
                     pending = false;
                     dragging = true;
                 }
@@ -600,21 +1088,79 @@ int main(int argc, char **argv) {
                                              else atomic_store(&a.restart, 1);
                                              break;
                         case UI_SOLVE:       solve_grid(&a); refresh_display(&a); break;
+                        case UI_TIER:        a.tier = (LsTier)((a.tier + 1) % 3); break;
+                        case UI_ADD_LIGHT:   a.tool = (a.tool == UI_TOOL_LIGHT)
+                                                    ? UI_TOOL_NONE : UI_TOOL_LIGHT; break;
+                        case UI_ADD_PART:    a.tool = (a.tool == UI_TOOL_PART)
+                                                    ? UI_TOOL_NONE : UI_TOOL_PART; break;
+                        case UI_DUPLICATE:   app_duplicate(&a); break;
+                        case UI_DELETE:      app_delete(&a); break;
+                        case UI_UNDO:        app_undo(&a); break;
+                        case UI_REDO:        app_redo(&a); break;
                         case UI_SAVE:        save_outputs(&a); break;
                         case UI_SAVE_SCENE:  save_scene(&a); break;
                         case UI_BLENDER:     export_blender(&a); break;
                         default: break;
                     }
-                } else if (!a.st.grid_mode) {
-                    pending = true;
-                    press_x = e.button.x; press_y = e.button.y;
+                } else {
+                    int row = insp_row_at(&a, e.button.x, e.button.y);
+                    if (row >= 0) {
+                        const Field *f = &a.fields[row];
+                        a.typing = false; a.entry_len = 0;
+                        if (f->heading || f->readonly) { a.focus = -1; }
+                        else if (f->is_enum) {
+                            /* An enum has no continuum to scrub: clicking it
+                             * steps to the next value. */
+                            a.focus = row;
+                            scene_pause(&a); push_undo(&a); scene_resume(&a);
+                            double nv = f->value + 1.0;
+                            if (nv > f->hi) nv = f->lo;
+                            insp_commit(&a, nv);
+                        } else {
+                            a.focus = row;
+                            scrubbing = true;
+                            scrub_start = e.button.x;
+                            scrub_base = f->value;
+                            scrub_moved = false;
+                        }
+                    } else if (!a.st.grid_mode) {
+                        pending = true;
+                        press_x = e.button.x; press_y = e.button.y;
+                        /* Pressing on an already-selected object begins a move;
+                         * pressing anywhere else begins an orbit. Click to
+                         * select, then drag it -- so orbiting never requires
+                         * finding empty space in a closed scene. */
+                        Camera cam = orbit_camera(&a, rw, rh);
+                        Ray pr;
+                        if (a.sel_light >= 0 &&
+                            view_pick_ray(&a, &cam, e.button.x, e.button.y, &pr)) {
+                            int px, py;
+                            if (project_view(&a, &cam, a.d.lights[a.sel_light].p, &px, &py) &&
+                                abs(px - e.button.x) < 18 && abs(py - e.button.y) < 18)
+                                moving = true;
+                        }
+                        if (!moving && a.sel_prim >= 0 &&
+                            view_pick_ray(&a, &cam, e.button.x, e.button.y, &pr)) {
+                            Hit hh;
+                            if (ls_scene_intersect(&a.d.scene, &pr, &hh) &&
+                                hh.prim_id == a.sel_prim)
+                                moving = true;
+                        }
+                        if (moving) { scene_pause(&a); push_undo(&a); scene_resume(&a); }
+                    }
                 }
             }
             else if (e.type == SDL_MOUSEBUTTONUP) {
-                if (pending && !a.st.grid_mode) {
-                    /* A press that never moved: select whatever is under it. */
+                if (scrubbing) {
+                    if (scrub_moved) solve_and_refresh(&a);
+                    else if (scrub_snapped) discard_last_undo(&a);
+                    scrubbing = false; scrub_moved = false; scrub_snapped = false;
+                }
+                if (moving) { moving = false; solve_and_refresh(&a); }
+                else if (pending && !a.st.grid_mode) {
                     Camera cam = orbit_camera(&a, rw, rh);
-                    pick_at(&a, &cam, e.button.x, e.button.y);
+                    if (a.tool != UI_TOOL_NONE) app_place(&a, &cam, e.button.x, e.button.y);
+                    else { pick_at(&a, &cam, e.button.x, e.button.y); a.focus = -1; }
                 }
                 pending = false;
                 dragging = false;
@@ -625,6 +1171,14 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (a.sel_light >= 0 && a.sel_light < a.d.nlights)
+            a.new_kind = a.d.lights[a.sel_light].kind;
+        a.st.tier = (int)a.tier;
+        a.st.tool = a.tool;
+        a.st.has_selection = (a.sel_light >= 0 || a.sel_prim >= 0);
+        a.st.can_undo = (a.undo_n > 0);
+        a.st.can_redo = (a.redo_n > 0);
+        insp_rebuild(&a);
         ui_apply_state(&a.t, a.st);
 
         SDL_SetRenderDrawColor(ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
@@ -676,12 +1230,25 @@ int main(int argc, char **argv) {
             SDL_RenderCopy(ren, rend_tex, NULL, &dst);
             draw_rect_line(ren, a.view_x, a.view_y, dw, dh, COL_RULE, 255);
 
+            /* Gizmos for objects outside the frustum still project to a
+             * coordinate, so the overlay has to be clipped to its own canvas or
+             * it draws over the title bar and the panels beside it. */
+            SDL_Rect clip = { a.view_x, a.view_y, dw, dh };
+            SDL_RenderSetClipRect(ren, &clip);
             Camera cam = orbit_camera(&a, rw, rh);
             draw_overlay(ren, &a, &cam);
+            SDL_RenderSetClipRect(ren, NULL);
 
-            snprintf(buf, sizeof buf, "%d PASSES  %d SPP  CLICK TO SELECT  DRAG TO ORBIT",
-                     atomic_load(&a.passes), atomic_load(&a.passes) * 4);
-            draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_MUTED, 255);
+            if (a.tool != UI_TOOL_NONE) {
+                snprintf(buf, sizeof buf, "CLICK A SURFACE TO PLACE %s   ESC CANCELS",
+                         a.tool == UI_TOOL_LIGHT ? "A LIGHT" : "A PART");
+                draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_ACCENT, 255);
+            } else {
+                snprintf(buf, sizeof buf,
+                         "%d PASSES  CLICK TO SELECT  DRAG SELECTION TO MOVE  DRAG ELSEWHERE TO ORBIT",
+                         atomic_load(&a.passes));
+                draw_text(ren, a.view_x, a.view_y + dh + 12, 1, buf, COL_MUTED, 255);
+            }
         }
 
         /* ---- statistics ---- */
@@ -708,8 +1275,11 @@ int main(int argc, char **argv) {
         }
         draw_text_right(ren, sx + STATS_W - 14, sy + 224, 1, unit, COL_MUTED, 255);
 
-        /* ---- probe readout ---- */
-        int py = sy + 262;
+        insp_draw(ren, &a);
+
+        /* ---- probe readout (field map only; the inspector takes over in 3D) */
+        int py = sy + 208;
+        if (!a.st.grid_mode) py = -1000;
         draw_rect_fill(ren, sx, py, STATS_W, 92, COL_PANEL, 255);
         draw_rect_line(ren, sx, py, STATS_W, 92, COL_RULE, 255);
         draw_text(ren, sx + 14, py + 14, 1,
@@ -784,6 +1354,8 @@ int main(int argc, char **argv) {
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
+    clear_stack(a.undo, &a.undo_n);
+    clear_stack(a.redo, &a.redo_n);
     free(a.g_full); free(a.g_direct); free(a.disp); free(a.other); free(a.rgb);
     ls_film_free(&a.film);
     ls_scene_desc_free(&a.d);

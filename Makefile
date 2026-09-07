@@ -47,7 +47,20 @@ APPOBJ  := $(patsubst apps/%.c,$(BUILD)/apps_%.o,$(APPSRC))
 
 .PHONY: all test debug clean test-asan test-ubsan check-purity view
 
-all: lightsim
+# One build command. The viewer is included whenever SDL2 is available; without
+# it the library, CLI and tests still build exactly as before.
+SDL_PROBE := $(shell pkg-config --exists sdl2 2>/dev/null && echo yes)
+ifeq ($(SDL_PROBE),yes)
+  DEFAULT_TARGETS := lightsim lightsim-view
+else
+  DEFAULT_TARGETS := lightsim
+endif
+
+all: $(DEFAULT_TARGETS)
+	@if [ "$(SDL_PROBE)" != "yes" ]; then \
+	    echo "note: SDL2 not found, so the interactive viewer was skipped."; \
+	    echo "      brew install sdl2   then re-run make"; \
+	fi
 
 lightsim: $(OBJ) $(APPOBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(APPOBJ) $(LDLIBS)
@@ -87,7 +100,7 @@ endif
 
 # ui.c and font.c carry no SDL dependency, so the headless suite can exercise
 # the toolbar rules and glyph coverage without a window.
-HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o
+HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o $(BUILD)/viewer_inspect.o
 
 $(BUILD)/run_tests: $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW) $(LDLIBS)

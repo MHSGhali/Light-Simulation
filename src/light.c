@@ -54,8 +54,40 @@ Light ls_light_rect(vec3 c, vec3 ex, vec3 ey, ls_real phi_e_w, Spectrum spd) {
     return l;
 }
 
+ls_real ls_light_k_from_beam_angle(ls_real beam_deg) {
+    ls_real half = ls_clamp(beam_deg, 0.2, 179.0) * 0.5 * LS_PI / 180.0;
+    ls_real c = cos(half);
+    if (c <= 0.0 || c >= 1.0) return 1.0;
+    return log(0.5) / log(c);
+}
+
+ls_real ls_light_beam_angle_from_k(ls_real k) {
+    if (k <= 0.0) return 180.0;
+    return 2.0 * acos(ls_clamp(pow(0.5, 1.0 / k), -1.0, 1.0)) * 180.0 / LS_PI;
+}
+
+ls_real ls_light_field_angle_from_k(ls_real k) {
+    if (k <= 0.0) return 180.0;
+    return 2.0 * acos(ls_clamp(pow(0.1, 1.0 / k), -1.0, 1.0)) * 180.0 / LS_PI;
+}
+
+Light ls_light_beam(vec3 p, vec3 dir, ls_real beam_deg, ls_real phi_e_w, Spectrum spd) {
+    Light l = base(LS_LIGHT_SPOT, spd);
+    l.p = p; l.n = v3norm(dir); l.phi_e = phi_e_w;
+    l.beam_k = ls_light_k_from_beam_angle(beam_deg);
+    l.cos_total = -1.0;          /* untruncated: the cosine power IS the falloff */
+    l.cos_falloff = -1.0;
+    return l;
+}
+
 /* Spot falloff: 1 inside the inner cone, smoothstep to 0 at the outer cone. */
 static ls_real spot_falloff(const Light *l, ls_real cos_theta) {
+    if (l->beam_k > 0.0) {
+        /* Cosine power, optionally truncated by an explicit cutoff cone. */
+        if (cos_theta <= 0.0) return 0.0;
+        if (l->cos_total > -1.0 && cos_theta <= l->cos_total) return 0.0;
+        return pow(cos_theta, l->beam_k);
+    }
     if (cos_theta <= l->cos_total)   return 0.0;
     if (cos_theta >= l->cos_falloff) return 1.0;
     ls_real t = (cos_theta - l->cos_total) / (l->cos_falloff - l->cos_total);
@@ -67,6 +99,15 @@ static ls_real spot_falloff(const Light *l, ls_real cos_theta) {
  * For a hard-edged cone this is the exact 2 pi (1 - cos_total); the smoothstep
  * region is integrated numerically. */
 static ls_real spot_omega_eff(const Light *l) {
+    if (l->beam_k > 0.0) {
+        /* integral cos^k dw over the hemisphere = 2 pi / (k+1), exactly.
+         * With a cutoff the upper limit moves and the closed form becomes
+         * 2 pi (1 - cos_total^(k+1)) / (k+1). */
+        ls_real k = l->beam_k;
+        if (l->cos_total > -1.0 && l->cos_total > 0.0)
+            return LS_TWO_PI * (1.0 - pow(l->cos_total, k + 1.0)) / (k + 1.0);
+        return LS_TWO_PI / (k + 1.0);
+    }
     if (l->cos_falloff <= l->cos_total)
         return LS_TWO_PI * (1.0 - l->cos_total);
     /* Hard part plus the numerically integrated transition. */

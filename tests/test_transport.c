@@ -136,6 +136,51 @@ void test_transport(void) {
         CHECK(sf.omega_eff < 0.8417872144769325);   /* narrower than hard-edged */
     }
 
+    SECTION("cosine-power beam angles");
+    {
+        /* A datasheet beam angle must round-trip exactly through k. */
+        for (double beam = 5.0; beam <= 170.0; beam += 5.0) {
+            double k = ls_light_k_from_beam_angle(beam);
+            CHECK_NEAR(ls_light_beam_angle_from_k(k), beam, 1e-9);
+        }
+        /* k = 1 is the Lambertian case: Omega_eff = pi exactly. */
+        CHECK_NEAR(ls_light_k_from_beam_angle(120.0), 1.0, 1e-9);
+
+        /* The field angle (10% of peak) must match the closed form, and the
+         * predicted values must stay near real datasheet pairs. */
+        struct { double beam, field; } ref[] = {
+            { 10.0, 18.2 }, { 24.0, 43.4 }, { 40.0, 71.2 }
+        };
+        for (size_t i = 0; i < sizeof ref / sizeof ref[0]; ++i) {
+            double k = ls_light_k_from_beam_angle(ref[i].beam);
+            CHECK_NEAR(ls_light_field_angle_from_k(k), ref[i].field, 5e-3);
+        }
+        NOTE("beam 24 deg -> k = %.2f, field angle %.1f deg",
+             ls_light_k_from_beam_angle(24.0),
+             ls_light_field_angle_from_k(ls_light_k_from_beam_angle(24.0)));
+
+        /* Omega_eff = 2 pi / (k+1), and the light must radiate exactly the flux
+         * it was given -- which is ls_light_finalize's own self-check. */
+        for (double beam = 10.0; beam <= 160.0; beam += 30.0) {
+            Light b = ls_light_beam(v3(0, 0, 0), v3(0, 0, -1), beam, 1.0, flat);
+            ls_light_finalize(&b, 0);
+            double k = ls_light_k_from_beam_angle(beam);
+            CHECK_NEAR(b.omega_eff, LS_TWO_PI / (k + 1.0), 1e-12);
+            CHECK_NEAR(ls_light_emitted_flux(&b), 1.0, 1e-12);
+            /* On-axis intensity I0 = Phi (k+1) / (2 pi). */
+            CHECK_NEAR(ls_light_intensity(&b, v3(0, 0, -1)),
+                       (k + 1.0) / LS_TWO_PI, 1e-12);
+        }
+
+        /* Intensity really is half the peak at the beam half-angle. */
+        Light b = ls_light_beam(v3(0, 0, 0), v3(0, 0, -1), 24.0, 1.0, flat);
+        ls_light_finalize(&b, 0);
+        double half = 12.0 * LS_PI / 180.0;
+        vec3 off = v3(sin(half), 0.0, -cos(half));
+        CHECK_NEAR(ls_light_intensity(&b, off),
+                   0.5 * ls_light_intensity(&b, v3(0, 0, -1)), 1e-9);
+    }
+
     SECTION("area sources against closed forms");
     {
         const int NS = 400000;

@@ -8,6 +8,18 @@
 #include "lightsim/sceneedit.h"
 #include "lightsim/integrator.h"
 #include <string.h>
+#include "lightsim/units.h"
+
+/* Set a light's luminous flux the way the inspector does: the authored value is
+ * what the user asked for, and the watts follow from the spectrum. */
+static bool ls_inspect_set_shim(SceneDesc *d, int i, double lumens) {
+    if (i < 0 || i >= d->nlights) return false;
+    d->lights[i].flux_in_lumens = true;
+    d->lights[i].flux_authored = lumens;
+    d->lights[i].phi_e = ls_watts_from_lumens(lumens, &d->lights[i].s_hat);
+    ls_scene_update_light(d, i);
+    return true;
+}
 
 #define SCENE_IN  "scenes/workcell.scene"
 #define SCENE_OUT "/tmp/lightsim_roundtrip.scene"
@@ -206,6 +218,51 @@ void test_scene(void) {
         for (int i = 0; i < d.nprims; ++i)
             CHECK(d.prims[i].light_id < d.nlights);
         ls_scene_desc_free(&d);
+    }
+
+    SECTION("build, edit, save, reload, re-solve");
+    {
+        /* The loop the editor exists to support, exercised end to end through
+         * exactly the calls the UI gestures make. */
+        SceneDesc d;
+        if (!ls_scene_load(&d, SCENE_IN)) return;
+
+        /* Place a light, as the ADD LIGHT tool does. */
+        Spectrum spd = ls_spectrum_daylight(4000.0);
+        Light l = ls_light_rect(v3(0.0, 0.0, 0.35), v3(0.05, 0, 0), v3(0, -0.05, 0),
+                                ls_watts_from_lumens(400.0, &spd), spd);
+        l.spd_kind = LS_SPD_DAYLIGHT;
+        l.spd_a = 4000.0;
+        l.flux_in_lumens = true;
+        l.flux_authored = 400.0;
+        int id = ls_scene_add_light(&d, l);
+        CHECK(id >= 0);
+
+        /* Retune it through the inspector, as scrubbing or typing does. */
+        CHECK(ls_inspect_set_shim(&d, id, 850.0));
+        check_pairing(&d);
+
+        double before = probe(&d, v3(0.0, 0.0, 0.001));
+        CHECK(before > 0.0);
+
+        /* Save, reload, and the reloaded scene must simulate identically --
+         * which is what makes a session recoverable rather than merely
+         * screenshot-able. */
+        CHECK(ls_scene_save(&d, SCENE_OUT));
+        SceneDesc r;
+        CHECK(ls_scene_load(&r, SCENE_OUT));
+        CHECK(r.nlights == d.nlights);
+        double after = probe(&r, v3(0.0, 0.0, 0.001));
+        CHECK_NEAR(after, before, 1e-12);
+        NOTE("edited scene re-solves to %.9g W/m^2 after a save/reload", after);
+        check_pairing(&r);
+
+        /* And the light we placed came back with the flux we asked for. */
+        CHECK_NEAR(r.lights[id].flux_authored, 850.0, 1e-9);
+        CHECK(r.lights[id].flux_in_lumens);
+
+        ls_scene_desc_free(&d);
+        ls_scene_desc_free(&r);
     }
 
     SECTION("clone is a deep copy");
