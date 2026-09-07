@@ -66,7 +66,26 @@ Writes a tone-mapped PPM plus a PFM holding raw radiance in physical units.
 | `U` | lux ↔ W/m² | | `Del` | delete |
 | `T` | full ↔ direct-only | | `⌘Z` / `⌘Y` | undo / redo |
 | `Q` | draft ↔ fine | | `S` `W` `B` | save PPM / scene / Blender |
-| `R` | re-solve the field | | `Esc` | cancel, then deselect, then quit |
+| `R` | re-solve the field | | `Tab` | cycle selection |
+| `F` | drape the field on the 3D geometry | | `Esc` | cancel, then deselect, then quit |
+
+**Both views are always on screen.** `1` and `2` decide which gets the larger
+pane; the other stays visible beside it. The 3D pane draws the measured field
+where it was measured — one coloured quad per measurement point, laid on the
+grid plane through the same viridis ramp as the map beside it, so the two panes
+are visibly one result rather than two pictures. `F` turns that off.
+
+### The transform gizmo
+
+Selecting an object puts a gizmo on it: three axis handles to slide along X, Y
+or Z, and three rings to rotate about each. Handles keep a constant on-screen
+size whatever the distance, and the axes sit inside the rings so the inner
+handle wins where they cross. Rings are only offered where rotating means
+something — a point or sphere source has no orientation, so it gets axes only.
+
+Rotating an area light turns its emitting face and its paired geometry together,
+and cannot change how much light it emits: area, flux and radiance are all held,
+and `ls_light_finalize`'s flux self-check still passes afterwards.
 
 Hover the field map to probe a point; the cross-section follows the row under
 the cursor.

@@ -32,6 +32,42 @@ static inline vec3 v3lerp(ls_real t, vec3 a, vec3 b) { return v3add(a, v3scale(v
 static inline ls_real v3maxc(vec3 a) { return ls_max(a.x, ls_max(a.y, a.z)); }
 static inline ls_real v3minc(vec3 a) { return ls_min(a.x, ls_min(a.y, a.z)); }
 
+/* Rotate `v` about a unit `axis` by `angle` radians (Rodrigues). Right-handed:
+ * positive angle turns counter-clockwise looking down the axis toward the
+ * origin. */
+static inline vec3 v3rotate(vec3 v, vec3 axis, ls_real angle) {
+    ls_real c = cos(angle), s = sin(angle);
+    return v3add(v3add(v3scale(v, c), v3scale(v3cross(axis, v), s)),
+                 v3scale(axis, v3dot(axis, v) * (1.0 - c)));
+}
+
+/* Closest point on the line (p, dir) to the line (o, d), returned as the
+ * parameter t along the first. Returns false when the lines are near-parallel,
+ * where the closest point is not well defined. Used to drag along an axis
+ * handle: the axis is one line, the pick ray the other. */
+static inline bool ls_line_closest_t(vec3 p, vec3 dir, vec3 o, vec3 d,
+                                     ls_real *t_out) {
+    ls_real b = v3dot(dir, d);
+    ls_real denom = 1.0 - b * b;
+    if (fabs(denom) < 1e-7) return false;
+    vec3 w0 = v3sub(p, o);
+    ls_real dd = v3dot(dir, w0), e = v3dot(d, w0);
+    *t_out = (b * e - dd) / denom;
+    return true;
+}
+
+/* Intersect the ray (o, d) with the plane through `p` with unit normal `n`.
+ * Returns false when the ray is near-parallel to the plane, where the hit is
+ * numerically useless. Used to drag a rotation ring. */
+static inline bool ls_ray_plane(vec3 o, vec3 d, vec3 p, vec3 n, vec3 *hit) {
+    ls_real dn = v3dot(d, n);
+    if (fabs(dn) < 1e-6) return false;
+    ls_real t = v3dot(v3sub(p, o), n) / dn;
+    if (t <= 0.0) return false;
+    *hit = v3add(o, v3scale(d, t));
+    return true;
+}
+
 /* Orthonormal basis around a unit normal (Duff et al., branchless, stable). */
 typedef struct { vec3 t, b, n; } Basis;
 static inline Basis ls_basis(vec3 n) {
