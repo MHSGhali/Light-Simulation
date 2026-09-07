@@ -18,6 +18,7 @@
 #include <math.h>
 
 #include "lightsim/scenefile.h"
+#include "lightsim/sceneedit.h"
 #include "lightsim/integrator.h"
 #include "lightsim/analysis.h"
 #include "lightsim/units.h"
@@ -412,6 +413,21 @@ static void save_outputs(App *a) {
     }
 }
 
+/* Write the edited scene back beside the one it was loaded from, so a session
+ * can be reopened in this tool and also re-run headlessly from the CLI. The
+ * original is never overwritten -- an edit should not silently rewrite the file
+ * the user authored. */
+static void save_scene(App *a) {
+    char path[512];
+    snprintf(path, sizeof path, "%s", a->scene_path);
+    size_t n = strlen(path);
+    const char *suffix = ".edited.scene";
+    if (n > 6 && strcmp(path + n - 6, ".scene") == 0) path[n - 6] = '\0';
+    strncat(path, suffix, sizeof path - strlen(path) - 1);
+    if (ls_scene_save(&a->d, path)) printf("wrote %s\n", path);
+    else fprintf(stderr, "could not write %s\n", path);
+}
+
 static void export_blender(App *a) {
     const char *unit = ls_quantity_unit(LS_Q_IRRADIANCE,
         a->st.photometric ? LS_UNITS_PHOTOMETRIC : LS_UNITS_RADIOMETRIC);
@@ -540,6 +556,7 @@ int main(int argc, char **argv) {
                                  break;
                     case SDLK_r: if (a.st.grid_mode) { solve_grid(&a); refresh_display(&a); } break;
                     case SDLK_s: save_outputs(&a); break;
+                    case SDLK_w: save_scene(&a); break;
                     case SDLK_b: export_blender(&a); break;
                     default: break;
                 }
@@ -584,6 +601,7 @@ int main(int argc, char **argv) {
                                              break;
                         case UI_SOLVE:       solve_grid(&a); refresh_display(&a); break;
                         case UI_SAVE:        save_outputs(&a); break;
+                        case UI_SAVE_SCENE:  save_scene(&a); break;
                         case UI_BLENDER:     export_blender(&a); break;
                         default: break;
                     }

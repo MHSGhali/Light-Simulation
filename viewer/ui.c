@@ -30,6 +30,7 @@ void ui_init(Toolbar *t) {
     add(t, UI_QUALITY,     "DRAFT",     "Q", false, &y);
     add(t, UI_SOLVE,       "SOLVE",     "R", true,  &y);
     add(t, UI_SAVE,        "SAVE PPM",  "S", true,  &y);
+    add(t, UI_SAVE_SCENE,  "SAVE SCENE","W", false, &y);
     add(t, UI_BLENDER,     "BLENDER",   "B", false, &y);
 }
 
@@ -87,6 +88,7 @@ void ui_apply_state(Toolbar *t, UiState s) {
                 b->enabled = s.has_grid && !s.solving && s.grid_mode;
                 break;
             case UI_SAVE:
+            case UI_SAVE_SCENE:
                 b->enabled = true;
                 b->active = false;
                 break;

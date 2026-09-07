@@ -23,6 +23,7 @@ typedef enum {
     UI_QUALITY,
     UI_SOLVE,
     UI_SAVE,
+    UI_SAVE_SCENE,
     UI_BLENDER,
     UI_ACTION_COUNT
 } UiAction;
