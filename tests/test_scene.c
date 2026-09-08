@@ -422,6 +422,35 @@ void test_scene(void) {
         ls_scene_desc_free(&b);
     }
 
+    SECTION("the viewer's units hint fires only on a real mistake");
+    {
+        /* The viewer has no command line to take --import-scale on, so it
+         * guesses. A guess is only defensible if it fires on the mistake and
+         * stays out of the way otherwise, which is what this pins. */
+        const double room = 0.6;                   /* the workcell */
+
+        /* Left alone: anything of a plausible size, including a part somewhat
+         * larger than the room. */
+        CHECK_NEAR(ls_import_units_hint(0.3,  room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(0.02, room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(2.0,  room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(4.8,  room), 1.0, 1e-15);   /* 8x, the edge */
+
+        /* Corrected: the real files that prompted this. A 305 mm linkage read
+         * as 305 m is 500x the room. */
+        CHECK_NEAR(ls_import_units_hint(0.3056 * 1000.0, room), 0.001, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(67.39, room), 0.001, 1e-15);
+
+        /* NOT corrected: something so large that millimetres does not explain
+         * it either. Shrinking that would hide a broken file behind a
+         * plausible-looking object. */
+        CHECK_NEAR(ls_import_units_hint(1e9, room), 1.0, 1e-15);
+
+        /* Degenerate inputs do not divide by anything. */
+        CHECK_NEAR(ls_import_units_hint(0.0, room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(1.0, 0.0),  1.0, 1e-15);
+    }
+
     SECTION("STL, in both its forms and with its missing units");
     {
         /* One tetrahedron, written as ASCII and as binary from the same
@@ -471,8 +500,8 @@ void test_scene(void) {
         }
 
         char err[256] = "";
-        Mesh *a1 = ls_stl_load("/tmp/ls_t.stl", 1.0, err);
-        Mesh *b1 = ls_stl_load("/tmp/ls_t_bin.stl", 1.0, err);
+        Mesh *a1 = ls_stl_load("/tmp/ls_t.stl", err);
+        Mesh *b1 = ls_stl_load("/tmp/ls_t_bin.stl", err);
         CHECK(a1 != NULL);
         CHECK(b1 != NULL);
         if (a1 && b1) {
@@ -485,15 +514,32 @@ void test_scene(void) {
             NOTE("STL tetrahedron: ascii area %.6f, binary %.6f", a1->area, b1->area);
         }
 
-        /* Scale is the whole answer to STL's missing units: it multiplies every
-         * vertex, so a millimetre part becomes a metre one. */
-        Mesh *mm = ls_stl_load("/tmp/ls_t.stl", 0.001, err);
-        CHECK(mm != NULL);
-        if (mm && a1) {
-            CHECK_NEAR(mm->hi.x, a1->hi.x * 0.001, 1e-12);
-            CHECK_NEAR(mm->area, a1->area * 1e-6, 1e-9);   /* area goes as s^2 */
-            CHECK_NEAR(mm->scale, 0.001, 1e-15);
-            ls_mesh_release(mm);
+        /* Scale is the answer to STL's missing units, and it lives on the
+         * Prim rather than in the vertices -- so it can be changed after the
+         * import, which is the whole point, and the same Mesh can be placed
+         * twice at two sizes. Here: the same geometry at 1 and at 1/1000. */
+        if (a1) {
+            Prim big, small;
+            memset(&big, 0, sizeof big);
+            big.kind = LS_PRIM_MESH;
+            big.ex = v3(1,0,0); big.ey = v3(0,1,0); big.n = v3(0,0,1);
+            big.mat_id = 0; big.light_id = -1; big.mesh_id = 0;
+            big.r = 1.0;
+            small = big;
+            small.r = 0.001;
+
+            vec3 blo, bhi, slo, shi;
+            ls_mesh_world_bounds(a1, &big, &blo, &bhi);
+            ls_mesh_world_bounds(a1, &small, &slo, &shi);
+            CHECK_NEAR(bhi.x - blo.x, a1->hi.x - a1->lo.x, 1e-12);
+            CHECK_NEAR(shi.x - slo.x, (a1->hi.x - a1->lo.x) * 0.001, 1e-12);
+
+            /* And a ray finds the scaled solid where the scale says it is, at
+             * a t measured in world units. */
+            Ray r1 = { v3(0.0001, 0.0001, 1.0), v3(0, 0, -1), 0.0, HUGE_VAL };
+            Hit h1;
+            CHECK(ls_mesh_intersect(a1, &small, &r1, 0, &h1));
+            CHECK(h1.t > 0.99 && h1.t < 1.0);   /* the 1 mm solid, a metre below */
         }
         if (a1) ls_mesh_release(a1);
         if (b1) ls_mesh_release(b1);
@@ -503,11 +549,11 @@ void test_scene(void) {
         if (f) { fputs("solid x\nfacet normal 0 0 0\nouter loop\n"
                        "vertex 0 0 0\nvertex 1 0 0\n", f); fclose(f); }
         err[0] = '\0';
-        CHECK(ls_stl_load("/tmp/ls_t_bad.stl", 1.0, err) == NULL);
+        CHECK(ls_stl_load("/tmp/ls_t_bad.stl", err) == NULL);
         CHECK(err[0] != '\0');
         f = fopen("/tmp/ls_t_empty.stl", "w");
         if (f) { fputs("solid x\nendsolid x\n", f); fclose(f); }
-        CHECK(ls_stl_load("/tmp/ls_t_empty.stl", 1.0, err) == NULL);
+        CHECK(ls_stl_load("/tmp/ls_t_empty.stl", err) == NULL);
         remove("/tmp/ls_t.stl"); remove("/tmp/ls_t_bin.stl");
         remove("/tmp/ls_t_bad.stl"); remove("/tmp/ls_t_empty.stl");
     }
@@ -534,19 +580,19 @@ void test_scene(void) {
             fputs(bad[i][1], f);
             fclose(f);
             char err[256] = "";
-            Mesh *m = ls_obj_load(bad[i][0], NULL, 1.0, err);
+            Mesh *m = ls_obj_load(bad[i][0], NULL, err);
             CHECK(m == NULL);
             CHECK(err[0] != '\0');            /* and it says why */
             if (m) ls_mesh_release(m);
             remove(bad[i][0]);
         }
         char err[256] = "";
-        CHECK(ls_obj_load("/tmp/ls_does_not_exist.obj", NULL, 1.0, err) == NULL);
+        CHECK(ls_obj_load("/tmp/ls_does_not_exist.obj", NULL, err) == NULL);
         CHECK(err[0] != '\0');
 
         /* A well-formed file still loads, so the checks above are not just
          * rejecting everything. */
-        Mesh *ok = ls_obj_load("scenes/models/bracket.obj", "post", 1.0, err);
+        Mesh *ok = ls_obj_load("scenes/models/bracket.obj", "post", err);
         CHECK(ok != NULL);
         if (ok) {
             CHECK(ok->ntris == 12);            /* one box of the two */

@@ -217,11 +217,11 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             Prim pr;
             memset(&pr, 0, sizeof pr);
             pr.kind = LS_PRIM_MESH;
-            /* The scale the file was read at. It cannot live in the Prim's
-             * basis, which must stay orthonormal for the inverse-by-transpose
-             * in ls_mesh_intersect, so it is applied to the vertices as they
-             * are read -- which means the directive has to carry it, or a
-             * reload would silently return to the file's own units. */
+            /* A uniform scale, living on the Prim rather than baked into the
+             * vertices, so it stays adjustable after the import. It cannot go
+             * in the basis -- that must stay orthonormal for the
+             * inverse-by-transpose in ls_mesh_intersect -- so `r`, which no
+             * other field of a mesh Prim uses, carries it. */
             ls_real mscale = num(&p);
             pr.c = vec(&p); pr.n = vec(&p); pr.ex = vec(&p); pr.ey = vec(&p);
             pr.mat_id = mid;
@@ -229,9 +229,9 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             if (!p.ok) break;
             char resolved[1024];
             ls_resolve_path(d->base_dir, pbuf, resolved, sizeof resolved);
+            pr.r = mscale;
             Mesh *msh = ls_obj_load(resolved,
-                                    strcmp(gbuf, "-") ? gbuf : NULL,
-                                    mscale, d->err);
+                                    strcmp(gbuf, "-") ? gbuf : NULL, d->err);
             if (!msh) { p.ok = false; break; }
             pr.mesh_id = ls_scene_add_mesh(d, msh);
             if (pr.mesh_id < 0) { ls_mesh_release(msh); p.ok = false; break; }
@@ -416,7 +416,7 @@ bool ls_scene_save(const SceneDesc *d, const char *path) {
                               ? d->meshes[p->mesh_id] : NULL;
                 if (!m) break;                       /* a deleted mesh's hole */
                 fprintf(f, "mesh %s %s %s %.17g", mat, m->src_path,
-                        m->group[0] ? m->group : "-", m->scale);
+                        m->group[0] ? m->group : "-", p->r);
                 wvec17(f, p->c); wvec17(f, p->n);
                 wvec17(f, p->ex); wvec17(f, p->ey);
                 fprintf(f, "\n");

@@ -305,18 +305,44 @@ void ls_mesh_release(Mesh *m) {
 
 /* ------------------------------------------------------- placed in world -- */
 
-/* World -> object. The basis is orthonormal, so its inverse is its transpose
- * and there is no scaling: `t` means the same number in both spaces, which is
- * what lets ray.tmin/tmax pass through untouched and lets the result be
- * compared directly against every other primitive's t. */
+/* World -> object. The basis is orthonormal, so its inverse is its transpose,
+ * and `r` carries a uniform scale.
+ *
+ * The object-space direction is deliberately NOT renormalised. Dividing both
+ * the origin offset and the direction by the scale leaves the ray parameter
+ * meaning the same number in both spaces:
+ *
+ *     Q(t) = R^T(o + t*d - c)/s  =  [R^T(o-c)/s] + t*[R^T d / s]
+ *
+ * so `t` comes back directly comparable with every other primitive's, and
+ * ray.tmin/tmax pass through untouched. Renormalising d' would scale t by s and
+ * quietly break both -- including ls_scene_occluded's `dist * (1 - 1e-6)`,
+ * which is a length in world units. */
 static Ray to_object(const Prim *p, const Ray *r) {
+    ls_real s = (p->r > 0.0) ? p->r : 1.0;
+    ls_real inv = 1.0 / s;
     vec3 rel = v3sub(r->o, p->c);
     Ray q;
-    q.o = v3(v3dot(rel, p->ex), v3dot(rel, p->ey), v3dot(rel, p->n));
-    q.d = v3(v3dot(r->d, p->ex), v3dot(r->d, p->ey), v3dot(r->d, p->n));
+    q.o = v3scale(v3(v3dot(rel, p->ex), v3dot(rel, p->ey), v3dot(rel, p->n)), inv);
+    q.d = v3scale(v3(v3dot(r->d, p->ex), v3dot(r->d, p->ey), v3dot(r->d, p->n)), inv);
     q.tmin = r->tmin;
     q.tmax = r->tmax;
     return q;
+}
+
+/* World-space bounds of a placed mesh, for the editor's outline and for
+ * deciding where a dropped object sits. */
+void ls_mesh_world_bounds(const Mesh *m, const Prim *p, vec3 *lo, vec3 *hi) {
+    ls_real s = (p->r > 0.0) ? p->r : 1.0;
+    box_reset(lo, hi);
+    for (int k = 0; k < 8; ++k) {
+        vec3 o = v3((k & 1) ? m->hi.x : m->lo.x,
+                    (k & 2) ? m->hi.y : m->lo.y,
+                    (k & 4) ? m->hi.z : m->lo.z);
+        o = v3scale(o, s);
+        box_add(lo, hi, v3add(p->c, v3add(v3scale(p->ex, o.x),
+                              v3add(v3scale(p->ey, o.y), v3scale(p->n, o.z)))));
+    }
 }
 
 bool ls_mesh_intersect(const Mesh *m, const Prim *p, const Ray *r,
@@ -327,7 +353,9 @@ bool ls_mesh_intersect(const Mesh *m, const Prim *p, const Ray *r,
     if (!ls_mesh_intersect_local(m, &q, &t, &ng, NULL)) return false;
 
     /* Object -> world for the normal is the same orthonormal basis applied
-     * forward; with no scale the inverse-transpose degenerates to it. */
+     * forward. A UNIFORM scale leaves the inverse-transpose parallel to R, so
+     * it changes the normal's length and not its direction, and ng is already
+     * unit. A non-uniform scale would not, which is why only one is offered. */
     vec3 nw = v3add(v3scale(p->ex, ng.x),
                     v3add(v3scale(p->ey, ng.y), v3scale(p->n, ng.z)));
     hit->t        = t;

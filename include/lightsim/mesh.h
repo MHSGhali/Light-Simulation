@@ -59,7 +59,6 @@ typedef struct {
      * memory, which the writer then has to skip. */
     char     src_path[512];
     char     group[64];
-    ls_real  scale;                /* what src_path's units were multiplied by */
 } Mesh;
 
 /* Copy `verts` and `idx` (3 indices per triangle) into a new mesh and build its
@@ -85,10 +84,14 @@ bool ls_mesh_intersect_local(const Mesh *m, const Ray *r,
                              ls_real *t_out, vec3 *ng_out, int *tri_out);
 bool ls_mesh_occludes_local(const Mesh *m, const Ray *r);
 
-/* World-space queries for a mesh placed by `p` (kind LS_PRIM_MESH, with an
- * orthonormal ex/ey/n). Fills `hit` exactly as ls_prim_intersect does. */
+/* World-space queries for a mesh placed by `p` (kind LS_PRIM_MESH): `c`
+ * translates, (ex, ey, n) is an orthonormal basis, and `r` is a uniform scale.
+ * Fills `hit` exactly as ls_prim_intersect does. */
 bool ls_mesh_intersect(const Mesh *m, const Prim *p, const Ray *r,
                        int prim_id, Hit *hit);
 bool ls_mesh_occludes(const Mesh *m, const Prim *p, const Ray *r);
+
+/* The placed mesh's axis-aligned bounds in world space. */
+void ls_mesh_world_bounds(const Mesh *m, const Prim *p, vec3 *lo, vec3 *hi);
 
 #endif /* LIGHTSIM_MESH_H */

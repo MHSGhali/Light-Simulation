@@ -74,11 +74,13 @@ into a scene:
 
 ```sh
 ./lightsim grid scene.scene --import bracket.obj
-./lightsim grid scene.scene --import part.stl --import-scale 0.001
+./lightsim grid scene.scene --import part.stl --import-scale 0.001 --import-at 0 0 0
 ```
 
 In the viewer: **drag the file onto the window**, or press `I`. Imports go
-through the same undo as any other edit.
+through the same undo as any other edit, and the inspector's `SCALE` row
+resizes an imported mesh afterwards — it grows about its own footprint centre
+and base, so it neither slides sideways nor sinks through the floor.
 
 | | OBJ | STL |
 |---|---|---|
@@ -92,9 +94,17 @@ imported at face value arrives 1000× too large. Rather than guess, files are
 read as metres and the importer prints what it read:
 
 ```
-bracket: 180 x 120 x 160 m        <- millimetres, taken literally
-bracket: 0.18 x 0.12 x 0.16 m     <- the same file, --import-scale 0.001
+assembly: 136 x 305 x 16 m   at (382 143 -6.1)..(518 449 10.1)
+assembly: 0.136 x 0.306 x 0.0162 m  at (-0.068 -0.153 0)..(0.068 0.153 0.0162)
 ```
+
+The position is reported as well as the size, because each catches a different
+mistake. The size catches a units error. The **position** catches a part traced
+perfectly somewhere the camera will never look: a CAD tool lays parts out on a
+build plate, so an STL's coordinates sit a few hundred millimetres off the
+origin, and a part imported as-authored into a room centred on the origin lands
+outside the walls. `--import-at X Y Z` centres the footprint there and stands
+the geometry on that height.
 
 Refused rather than guessed: `Ke` emissive materials (a mesh emitter is found by
 BSDF sampling but is not in the light list, so the measured grid would read
