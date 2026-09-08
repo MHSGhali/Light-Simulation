@@ -422,6 +422,35 @@ void test_scene(void) {
         ls_scene_desc_free(&b);
     }
 
+    SECTION("the viewer's units hint fires only on a real mistake");
+    {
+        /* The viewer has no command line to take --import-scale on, so it
+         * guesses. A guess is only defensible if it fires on the mistake and
+         * stays out of the way otherwise, which is what this pins. */
+        const double room = 0.6;                   /* the workcell */
+
+        /* Left alone: anything of a plausible size, including a part somewhat
+         * larger than the room. */
+        CHECK_NEAR(ls_import_units_hint(0.3,  room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(0.02, room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(2.0,  room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(4.8,  room), 1.0, 1e-15);   /* 8x, the edge */
+
+        /* Corrected: the real files that prompted this. A 305 mm linkage read
+         * as 305 m is 500x the room. */
+        CHECK_NEAR(ls_import_units_hint(0.3056 * 1000.0, room), 0.001, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(67.39, room), 0.001, 1e-15);
+
+        /* NOT corrected: something so large that millimetres does not explain
+         * it either. Shrinking that would hide a broken file behind a
+         * plausible-looking object. */
+        CHECK_NEAR(ls_import_units_hint(1e9, room), 1.0, 1e-15);
+
+        /* Degenerate inputs do not divide by anything. */
+        CHECK_NEAR(ls_import_units_hint(0.0, room), 1.0, 1e-15);
+        CHECK_NEAR(ls_import_units_hint(1.0, 0.0),  1.0, 1e-15);
+    }
+
     SECTION("STL, in both its forms and with its missing units");
     {
         /* One tetrahedron, written as ASCII and as binary from the same

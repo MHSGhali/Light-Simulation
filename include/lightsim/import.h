@@ -89,4 +89,12 @@ int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
 /* As authored. */
 int ls_scene_import(SceneDesc *d, const char *path, ls_real scale);
 
+/* The scale a file of `file_extent` metres most likely wants, to join a scene
+ * spanning `scene_extent` metres: 1, or 0.001 when the geometry is so far out
+ * of proportion that it can only be a millimetre file read as metres.
+ *
+ * A guess, and only defensible where it is announced and undoable -- the
+ * viewer, which has no command line to take a scale on. The CLI asks instead. */
+ls_real ls_import_units_hint(ls_real file_extent, ls_real scene_extent);
+
 #endif /* LIGHTSIM_IMPORT_H */

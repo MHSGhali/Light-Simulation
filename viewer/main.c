@@ -1301,6 +1301,60 @@ static void save_scene(App *a) {
 /* Bring in an OBJ, or open a whole .scene. Goes through the same
  * pause/snapshot/resume discipline as every other edit, so ^Z undoes an import
  * in one step and the render thread is never reading a half-built scene. */
+/* How big the scene the user is working in actually is, so an import can be
+ * judged against it. The measurement grid is the best answer when there is one:
+ * it is the thing being studied. */
+static double scene_extent(const App *a) {
+    if (a->d.has_grid) {
+        double u = v3len(a->d.grid_u), v = v3len(a->d.grid_v);
+        return u > v ? u : v;
+    }
+    double e = 0.0;
+    for (int i = 0; i < a->d.nprims; ++i) {
+        const Prim *p = &a->d.prims[i];
+        double r = fabs(p->c.x) + fabs(p->c.y) + fabs(p->c.z) + p->r;
+        if (r > e) e = r;
+    }
+    return e > 1e-6 ? 2.0 * e : 2.0;
+}
+
+/* Where a dropped object should land: the centre of the measurement grid, on
+ * its plane. That is where the user is looking and what they are measuring. */
+static vec3 import_target(const App *a) {
+    if (!a->d.has_grid) return v3(0, 0, 0);
+    return v3add(a->d.grid_o,
+                 v3scale(v3add(a->d.grid_u, a->d.grid_v), 0.5));
+}
+
+static double mesh_extent(const App *a) {
+    double e = 0.0;
+    for (int i = 0; i < a->d.nmeshes; ++i) {
+        if (!a->d.meshes[i]) continue;
+        vec3 d = v3sub(a->d.meshes[i]->hi, a->d.meshes[i]->lo);
+        double m = d.x > d.y ? (d.x > d.z ? d.x : d.z) : (d.y > d.z ? d.y : d.z);
+        if (m > e) e = m;
+    }
+    return e;
+}
+
+/* Bring in an OBJ or STL, or open a whole .scene.
+ *
+ * The command line takes --import-scale and --import-at; there is nowhere to
+ * type those here, and the two things they fix are exactly what make an import
+ * fail invisibly. So the viewer decides, and says what it decided:
+ *
+ *   PLACEMENT is always applied. A CAD tool lays parts out on a build plate, so
+ *   a file's own coordinates are typically far from the origin -- imported
+ *   as-authored, the object is traced perfectly somewhere off-screen. Standing
+ *   it on the measurement grid is never worse, and the gizmo moves it after.
+ *
+ *   SCALE is only touched when the geometry is absurd against the scene it is
+ *   joining -- an object hundreds of times the size of the room is a units
+ *   mistake, not a design. STL carries no units and CAD means millimetres, so
+ *   the correction is the millimetre one. It is announced in the status line
+ *   and ^Z undoes it, which is the difference between an actionable default and
+ *   a silent guess.
+ */
 static void app_import(App *a, const char *path) {
     size_t n = strlen(path);
     if (n > 6 && strcmp(path + n - 6, ".scene") == 0) {
@@ -1318,21 +1372,49 @@ static void app_import(App *a, const char *path) {
         say(a, "OPENED %s", path);
         return;
     }
+
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    double room = scene_extent(a);
+    vec3 at = import_target(a);
+
     scene_pause(a);
     push_undo(a);
-    int added = ls_scene_import(&a->d, path, 1.0);   /* metres; see import.h */
+    int added = ls_scene_import_at(&a->d, path, 1.0, &at);
     scene_resume(a);
     if (added < 0) {
-        app_undo(a);              /* nothing was added; drop the snapshot */
+        app_undo(a);                  /* nothing landed; drop the snapshot */
         say(a, "%s", a->d.err);
         return;
     }
-    /* Select the first thing that arrived, so the inspector has something to
-     * show and the gizmo lands on it. */
+
+    bool rescaled = false;
+    if (ls_import_units_hint(mesh_extent(a), room) != 1.0) {
+        /* Try again in millimetres, and keep whichever fits. */
+        app_undo(a);
+        scene_pause(a);
+        push_undo(a);
+        int again = ls_scene_import_at(&a->d, path, 0.001, &at);
+        scene_resume(a);
+        if (again < 0) {              /* it read once, so this should not fail */
+            app_undo(a);
+            say(a, "%s", a->d.err);
+            return;
+        }
+        added = again;
+        rescaled = true;
+    }
+
+    /* Select what arrived, so the inspector shows it and the gizmo lands on it. */
     for (int i = a->d.nprims - 1; i >= 0; --i)
         if (a->d.prims[i].kind == LS_PRIM_MESH) { a->sel_prim = i; a->sel_light = -1; }
     solve_and_refresh(a);
-    say(a, "IMPORTED %d MESH%s FROM %s", added, added == 1 ? "" : "ES", path);
+    if (rescaled)
+        say(a, "%s  %d MESH%s  SCALED MM TO M  ^Z UNDOES", base, added,
+            added == 1 ? "" : "ES");
+    else
+        say(a, "%s  %d MESH%s  %.3G M ACROSS", base, added,
+            added == 1 ? "" : "ES", mesh_extent(a));
 }
 
 /* A file chooser without a dependency. SDL2 has none, and this project has no
@@ -1340,8 +1422,13 @@ static void app_import(App *a, const char *path) {
  * else, say so and point at drag and drop, which always works. */
 static void app_import_dialog(App *a) {
 #ifdef __APPLE__
+    /* Deliberately unfiltered. An earlier version listed {"obj", "scene"} and
+     * so hid every .stl the moment STL support was added -- the importer
+     * accepted them and the chooser would not show them. A filter that has to
+     * be kept in step with the readers will fall out of step; the importer
+     * already rejects what it cannot read, with a reason. */
     FILE *p = popen("osascript -e 'POSIX path of (choose file with prompt "
-                    "\"Import geometry\" of type {\"obj\", \"scene\"})' "
+                    "\"Import geometry (.obj, .stl, .scene)\")' "
                     "2>/dev/null", "r");
     if (!p) { say(a, "COULD NOT OPEN A FILE CHOOSER -- DRAG A FILE IN"); return; }
     char path[1024];

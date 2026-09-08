@@ -549,6 +549,20 @@ int ls_scene_import(SceneDesc *d, const char *path, ls_real scale) {
     return ls_scene_import_at(d, path, scale, NULL);
 }
 
+ls_real ls_import_units_hint(ls_real file_extent, ls_real scene_extent) {
+    if (!(file_extent > 0.0) || !(scene_extent > 0.0)) return 1.0;
+    /* Eight times the room is the threshold. A part legitimately larger than
+     * what is being measured is possible -- a wall panel, a machine frame --
+     * but not eight times larger; past that it is three orders of magnitude
+     * out, which is the millimetre mistake and nothing else. */
+    if (file_extent <= 8.0 * scene_extent) return 1.0;
+    /* Only if millimetres actually explains it. A file that is still absurd at
+     * 1/1000 is broken in some other way, and quietly shrinking it would hide
+     * that behind a plausible-looking object. */
+    if (file_extent * 0.001 > 8.0 * scene_extent) return 1.0;
+    return 0.001;
+}
+
 int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
                        const vec3 *at) {
     if (!ends_with_ci(path, ".stl"))
