@@ -278,7 +278,33 @@ static int mtl_material(SceneDesc *d, const char *name, ls_real kd[3],
 
 /* ------------------------------------------------------------- scene ---- */
 
+/* Where a freshly imported mesh should sit, given where its geometry actually
+ * is. Returns the Prim translation that puts the footprint centre at (at.x,
+ * at.y) and the lowest point at at.z. */
+static vec3 placement(const Mesh *m, const vec3 *at) {
+    if (!at) return v3(0, 0, 0);
+    return v3(at->x - 0.5 * (m->lo.x + m->hi.x),
+              at->y - 0.5 * (m->lo.y + m->hi.y),
+              at->z - m->lo.z);
+}
+
+/* Both the size AND the position, because either one alone hides a whole class
+ * of mistake: the size catches a units error, the position catches a part that
+ * is faithfully traced somewhere the camera will never look. */
+static void report(const char *name, const Mesh *m, vec3 off) {
+    vec3 lo = v3add(m->lo, off), hi = v3add(m->hi, off);
+    printf("        %s: %.4g x %.4g x %.4g m  at (%.3g %.3g %.3g)..(%.3g %.3g %.3g)\n",
+           name, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z,
+           lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+}
+
+
 int ls_scene_import_obj(SceneDesc *d, const char *path, ls_real scale) {
+    return ls_scene_import_obj_at(d, path, scale, NULL);
+}
+
+int ls_scene_import_obj_at(SceneDesc *d, const char *path, ls_real scale,
+                           const vec3 *at) {
     /* Pass one: the group names and the mtllib, so each group can be loaded
      * into its own Mesh. */
     Slurp s;
@@ -378,11 +404,16 @@ int ls_scene_import_obj(SceneDesc *d, const char *path, ls_real scale) {
 
         Mesh *m = ls_obj_load(path, gname, scale, d->err);
         if (!m) return -1;
-        if (ls_scene_add_mesh_prim(d, m, mat) < 0) {
+        vec3 off = placement(m, at);
+        report(gname ? gname : "imported", m, off);
+        int pi = ls_scene_add_mesh_prim(d, m, mat);
+        if (pi < 0) {
             ls_mesh_release(m);
             snprintf(d->err, sizeof d->err, "out of memory adding '%s'", path);
             return -1;
         }
+        d->prims[pi].c = off;
+        ls_scene_rebuild(d);
         added++;
     }
     return added;
@@ -515,8 +546,13 @@ static bool ends_with_ci(const char *s, const char *suffix) {
 }
 
 int ls_scene_import(SceneDesc *d, const char *path, ls_real scale) {
+    return ls_scene_import_at(d, path, scale, NULL);
+}
+
+int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
+                       const vec3 *at) {
     if (!ends_with_ci(path, ".stl"))
-        return ls_scene_import_obj(d, path, scale);
+        return ls_scene_import_obj_at(d, path, scale, at);
 
     /* An STL carries no material of any kind, so it gets a neutral one to be
      * replaced by hand. Named after the file so several imports do not collide
@@ -535,15 +571,15 @@ int ls_scene_import(SceneDesc *d, const char *path, ls_real scale) {
     int mat = mtl_material(d, name[0] ? name : "imported", grey, false, d->err);
     if (mat < 0) { ls_mesh_release(m); return -1; }
 
-    vec3 lo = m->lo, hi = m->hi;
-    if (ls_scene_add_mesh_prim(d, m, mat) < 0) {
+    vec3 off = placement(m, at);
+    report(name, m, off);
+    int pi = ls_scene_add_mesh_prim(d, m, mat);
+    if (pi < 0) {
         ls_mesh_release(m);
         snprintf(d->err, sizeof d->err, "out of memory adding '%s'", path);
         return -1;
     }
-    /* The bounding box, because an STL does not say what its numbers mean. A
-     * part exported in millimetres shows up here as tens of metres. */
-    printf("        %s: %.4g x %.4g x %.4g m\n", name,
-           hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+    d->prims[pi].c = off;
+    ls_scene_rebuild(d);
     return 1;
 }

@@ -26,6 +26,8 @@ static void usage(const char *prog) {
     printf("           [--import FILE.obj|FILE.stl] [--import-scale S]\n");
     printf("             add geometry. Files are assumed to be in METRES;\n");
     printf("             an STL from CAD is usually mm, so --import-scale 0.001\n");
+    printf("           [--import-at X Y Z]  stand it at a point rather than\n");
+    printf("             wherever the file's own coordinates put it\n");
     printf("  %s render <scene.txt> [--out FILE.ppm] [--spp N] [--depth N]\n\n", prog);
     printf("source models:\n");
     printf("  blackbody <T_K>                 Planckian radiator\n");
@@ -42,10 +44,13 @@ typedef struct {
     const char *blender;
     const char *import;
     double import_scale;
+    bool   import_place;
+    vec3   import_at;
 } Opts;
 
 static Opts parse_opts(int argc, char **argv, int from, const char *def_out) {
-    Opts o = { LS_UNITS_PHOTOMETRIC, def_out, 256, 64, 4, 0, NULL, NULL, 1.0 };
+    Opts o = { LS_UNITS_PHOTOMETRIC, def_out, 256, 64, 4, 0, NULL, NULL, 1.0,
+               false, { 0, 0, 0 } };
     for (int i = from; i < argc; ++i) {
         if (!strcmp(argv[i], "--units") && i + 1 < argc) {
             ++i;
@@ -60,6 +65,11 @@ static Opts parse_opts(int argc, char **argv, int from, const char *def_out) {
         else if   (!strcmp(argv[i], "--import")   && i + 1 < argc) o.import = argv[++i];
         else if   (!strcmp(argv[i], "--import-scale") && i + 1 < argc)
                                                         o.import_scale = atof(argv[++i]);
+        else if   (!strcmp(argv[i], "--import-at") && i + 3 < argc) {
+            o.import_place = true;
+            o.import_at = v3(atof(argv[i+1]), atof(argv[i+2]), atof(argv[i+3]));
+            i += 3;
+        }
     }
     return o;
 }
@@ -150,7 +160,8 @@ static int cmd_grid(int argc, char **argv) {
     SceneDesc d;
     if (!ls_scene_load(&d, argv[0])) { fprintf(stderr, "scene error: %s\n", d.err); return 1; }
     if (o.import) {
-        int added = ls_scene_import(&d, o.import, o.import_scale);
+        int added = ls_scene_import_at(&d, o.import, o.import_scale,
+                                       o.import_place ? &o.import_at : NULL);
         if (added < 0) { fprintf(stderr, "import error: %s\n", d.err); return 1; }
         printf("import  %s -> %d mesh%s\n", o.import, added, added == 1 ? "" : "es");
     }
@@ -297,7 +308,8 @@ static int cmd_render(int argc, char **argv) {
     SceneDesc d;
     if (!ls_scene_load(&d, argv[0])) { fprintf(stderr, "scene error: %s\n", d.err); return 1; }
     if (o.import) {
-        int added = ls_scene_import(&d, o.import, o.import_scale);
+        int added = ls_scene_import_at(&d, o.import, o.import_scale,
+                                       o.import_place ? &o.import_at : NULL);
         if (added < 0) { fprintf(stderr, "import error: %s\n", d.err); return 1; }
         printf("import  %s -> %d mesh%s\n", o.import, added, added == 1 ? "" : "es");
     }

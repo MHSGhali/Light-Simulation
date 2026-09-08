@@ -69,9 +69,24 @@ Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]);
  *
  * Returns the number of prims added, or -1 with why in `d->err`. */
 int ls_scene_import_obj(SceneDesc *d, const char *path, ls_real scale);
+int ls_scene_import_obj_at(SceneDesc *d, const char *path, ls_real scale,
+                           const vec3 *at);
 
 /* Import any supported geometry file, picking the reader by extension.
- * `scale` multiplies every vertex; 1.0 means the file is already in metres. */
+ * `scale` multiplies every vertex; 1.0 means the file is already in metres.
+ *
+ * `at` places the result: the footprint is centred on (at.x, at.y) and the
+ * BOTTOM of the geometry is set to at.z, so `at = (0,0,0)` stands the part on
+ * the floor at the origin. NULL leaves the coordinates exactly as authored.
+ *
+ * The distinction matters more than it looks. A CAD tool lays parts out on a
+ * build plate, so an STL's coordinates are typically a few hundred millimetres
+ * from the origin in x and y -- import one as-authored into a room centred on
+ * the origin and it lands outside the walls, traced perfectly and invisible. */
+int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
+                       const vec3 *at);
+
+/* As authored. */
 int ls_scene_import(SceneDesc *d, const char *path, ls_real scale);
 
 #endif /* LIGHTSIM_IMPORT_H */
