@@ -9,6 +9,7 @@
 #include "lightsim/integrator.h"
 #include <string.h>
 #include "lightsim/units.h"
+#include "lightsim/mesh.h"
 
 /* Set a light's luminous flux the way the inspector does: the authored value is
  * what the user asked for, and the watts follow from the spectrum. */
@@ -418,5 +419,77 @@ void test_scene(void) {
 
         ls_scene_desc_free(&a);
         ls_scene_desc_free(&b);
+    }
+
+    SECTION("mesh geometry is shared by snapshots, not copied");
+    {
+        /* Meshes are the one thing a snapshot must NOT deep-copy: the editor
+         * keeps 32 undo and 32 redo scenes, and copying a large mesh into each
+         * would be gigabytes. They are refcounted instead, which is sound only
+         * because a Mesh is immutable once built -- placement lives on the Prim.
+         *
+         * Under `make test-asan` this section is also the double-free and
+         * use-after-free test for that sharing. */
+        vec3 v[4] = { v3(0,0,0), v3(1,0,0), v3(0,1,0), v3(0,0,1) };
+        int  idx[6] = { 0,1,2,  0,1,3 };
+
+        SceneDesc a;
+        memset(&a, 0, sizeof a);
+        Material m;
+        memset(&m, 0, sizeof m);
+        m.bsdf.kind = LS_BSDF_LAMBERT;
+        m.bsdf.rho = ls_spectrum_const(0.5);
+        int mid = ls_scene_add_material(&a, m, "mesh_mat");
+
+        Mesh *mesh = ls_mesh_build(v, 4, idx, 2);
+        CHECK(mesh != NULL);
+        if (!mesh) { ls_scene_desc_free(&a); return; }
+        CHECK(mesh->refs == 1);
+
+        int pi = ls_scene_add_mesh_prim(&a, mesh, mid);
+        CHECK(pi >= 0);
+        CHECK(a.nmeshes == 1);
+        CHECK(a.prims[pi].kind == LS_PRIM_MESH);
+        CHECK(a.prims[pi].mesh_id == 0);
+        CHECK(a.scene.meshes == a.meshes);      /* rebuild mirrored it */
+        CHECK(a.scene.nmeshes == 1);
+
+        /* The scene can see it. */
+        Ray r = { v3(0.25, 0.25, 1.0), v3(0, 0, -1), 0.0, HUGE_VAL };
+        Hit h;
+        CHECK(ls_scene_intersect(&a.scene, &r, &h));
+        CHECK(h.prim_id == pi);
+        CHECK(h.mat_id == mid);
+        CHECK_NEAR(h.t, 1.0, 1e-12);
+        CHECK(ls_scene_occluded(&a.scene, v3(0.25, 0.25, 1.0), v3(0,0,1),
+                                v3(0, 0, -1), 2.0));
+
+        /* A snapshot takes a reference; the arrays themselves are private. */
+        SceneDesc snap;
+        CHECK(ls_scene_clone(&a, &snap));
+        CHECK(snap.meshes != a.meshes);
+        CHECK(snap.meshes[0] == a.meshes[0]);   /* same payload */
+        CHECK(mesh->refs == 2);
+
+        /* Deleting the prim drops the live reference and leaves a hole rather
+         * than compacting -- the snapshot's mesh_id must keep meaning this
+         * mesh. The payload stays alive because the snapshot still holds it. */
+        ls_scene_remove_prim(&a, pi);
+        CHECK(a.nprims == 0);
+        CHECK(a.nmeshes == 1);                  /* not compacted */
+        CHECK(a.meshes[0] == NULL);             /* a hole */
+        CHECK(mesh->refs == 1);                 /* the snapshot kept it */
+
+        /* A hole is a miss, not a crash. */
+        CHECK(!ls_scene_intersect(&a.scene, &r, &h));
+
+        /* And the snapshot still renders the geometry the live scene dropped,
+         * which is what makes undo of a delete restore working geometry. */
+        CHECK(ls_scene_intersect(&snap.scene, &r, &h));
+        CHECK_NEAR(h.t, 1.0, 1e-12);
+
+        ls_scene_desc_free(&a);
+        CHECK(ls_scene_intersect(&snap.scene, &r, &h));   /* still alive */
+        ls_scene_desc_free(&snap);                        /* last reference */
     }
 }

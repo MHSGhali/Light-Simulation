@@ -45,6 +45,11 @@ typedef struct {
     Material *mats;    int nmats,   cap_mats;
     char    (*names)[32];
     Light    *lights;  int nlights, cap_lights;
+    /* Refcounted, so a clone shares the geometry rather than copying it -- the
+     * editor keeps 32 undo and 32 redo snapshots, and a 200k-triangle mesh
+     * copied 64 times is gigabytes. Sound only because a Mesh is immutable
+     * after ls_mesh_build; placement lives on the Prim. */
+    Mesh    **meshes;  int nmeshes, cap_meshes;
     char      err[256];
 } SceneDesc;
 

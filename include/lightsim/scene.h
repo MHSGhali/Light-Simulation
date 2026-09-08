@@ -7,6 +7,7 @@
 #include "geom.h"
 #include "light.h"
 #include "bsdf.h"
+#include "mesh.h"
 
 typedef struct {
     Bsdf     bsdf;
@@ -22,10 +23,23 @@ typedef struct {
     int       nmats;
     Light    *lights;
     int       nlights;
+    /* Triangle geometry, named by Prim.mesh_id. An entry may be NULL: deleting
+     * a mesh prim leaves a hole rather than compacting, so that mesh_id stays
+     * stable for every undo snapshot still holding one. */
+    Mesh    **meshes;
+    int       nmeshes;
 } Scene;
 
-/* Nearest hit. Returns false if the ray escapes. */
-bool ls_scene_intersect(const Scene *sc, const Ray *ray, Hit *hit);
+/* Nearest hit, optionally ignoring one primitive (`skip_prim < 0` ignores
+ * nothing). THE traversal entry point -- the BVH replaces this body in M4, and
+ * anything that walks the prim array itself has to be re-plumbed then, so
+ * callers that need an exclusion take it here rather than rolling their own.
+ * Returns false if the ray escapes. */
+bool ls_scene_intersect_ex(const Scene *sc, const Ray *ray, int skip_prim, Hit *hit);
+
+static inline bool ls_scene_intersect(const Scene *sc, const Ray *ray, Hit *hit) {
+    return ls_scene_intersect_ex(sc, ray, -1, hit);
+}
 
 /* Is the segment from `p` (offset off the surface along `ng`) toward `wi`,
  * of length `dist`, blocked? `dist` may be HUGE_VAL for directional lights.

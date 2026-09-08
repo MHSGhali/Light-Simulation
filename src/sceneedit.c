@@ -7,6 +7,7 @@ void ls_scene_rebuild(SceneDesc *d) {
     d->scene.prims  = d->prims;   d->scene.nprims  = d->nprims;
     d->scene.mats   = d->mats;    d->scene.nmats   = d->nmats;
     d->scene.lights = d->lights;  d->scene.nlights = d->nlights;
+    d->scene.meshes = d->meshes;  d->scene.nmeshes = d->nmeshes;
 }
 
 /* ------------------------------------------------------------- growth ---- */
@@ -17,6 +18,15 @@ static bool grow_prims(SceneDesc *d) {
     Prim *p = realloc(d->prims, (size_t)cap * sizeof *p);
     if (!p) return false;
     d->prims = p; d->cap_prims = cap;
+    return true;
+}
+
+static bool grow_meshes(SceneDesc *d) {
+    if (d->nmeshes < d->cap_meshes) return true;
+    int cap = d->cap_meshes ? d->cap_meshes * 2 : 4;
+    Mesh **m = realloc(d->meshes, (size_t)cap * sizeof *m);
+    if (!m) return false;
+    d->meshes = m; d->cap_meshes = cap;
     return true;
 }
 
@@ -70,6 +80,31 @@ int ls_scene_add_material(SceneDesc *d, Material m, const char *name) {
     return id;
 }
 
+int ls_scene_add_mesh(SceneDesc *d, Mesh *m) {
+    if (!m || !grow_meshes(d)) return -1;
+    int id = d->nmeshes;
+    d->meshes[id] = m;                      /* the caller's reference moves here */
+    d->nmeshes++;
+    ls_scene_rebuild(d);
+    return id;
+}
+
+int ls_scene_add_mesh_prim(SceneDesc *d, Mesh *m, int mat_id) {
+    int mid = ls_scene_add_mesh(d, m);
+    if (mid < 0) return -1;
+    Prim p;
+    memset(&p, 0, sizeof p);
+    p.kind = LS_PRIM_MESH;
+    p.c  = v3(0, 0, 0);
+    p.ex = v3(1, 0, 0);
+    p.ey = v3(0, 1, 0);
+    p.n  = v3(0, 0, 1);
+    p.mat_id = mat_id;
+    p.light_id = -1;
+    p.mesh_id = mid;
+    return ls_scene_add_prim(d, p);
+}
+
 int ls_scene_add_prim(SceneDesc *d, Prim p) {
     if (!grow_prims(d)) return -1;
     int id = d->nprims;
@@ -81,6 +116,17 @@ int ls_scene_add_prim(SceneDesc *d, Prim p) {
 
 void ls_scene_remove_prim(SceneDesc *d, int index) {
     if (index < 0 || index >= d->nprims) return;
+    /* Drop this scene's reference to the geometry and leave a hole. The array
+     * is NOT compacted: every undo snapshot holds its own reference and its own
+     * mesh_id, and shifting entries down here would leave those pointing at the
+     * wrong mesh. The payload survives until the last snapshot lets go, which
+     * is what makes undo of a delete restore working geometry. */
+    const Prim *dead = &d->prims[index];
+    if (dead->kind == LS_PRIM_MESH &&
+        dead->mesh_id >= 0 && dead->mesh_id < d->nmeshes) {
+        ls_mesh_release(d->meshes[dead->mesh_id]);
+        d->meshes[dead->mesh_id] = NULL;
+    }
     for (int i = index; i + 1 < d->nprims; ++i) d->prims[i] = d->prims[i + 1];
     d->nprims--;
     ls_scene_rebuild(d);
@@ -245,9 +291,11 @@ bool ls_scene_clone(const SceneDesc *src, SceneDesc *dst) {
      * replaced with private copies below. */
     *dst = *src;
     dst->prims = NULL; dst->mats = NULL; dst->names = NULL; dst->lights = NULL;
+    dst->meshes = NULL;
     dst->cap_prims = dst->nprims ? dst->nprims : 0;
     dst->cap_mats  = dst->nmats  ? dst->nmats  : 0;
     dst->cap_lights= dst->nlights? dst->nlights: 0;
+    dst->cap_meshes= dst->nmeshes? dst->nmeshes: 0;
 
     if (src->nprims > 0) {
         dst->prims = malloc((size_t)src->nprims * sizeof *dst->prims);
@@ -265,6 +313,13 @@ bool ls_scene_clone(const SceneDesc *src, SceneDesc *dst) {
         dst->lights = malloc((size_t)src->nlights * sizeof *dst->lights);
         if (!dst->lights) return false;
         memcpy(dst->lights, src->lights, (size_t)src->nlights * sizeof *dst->lights);
+    }
+    /* Geometry is shared, not copied: a snapshot takes a reference. */
+    if (src->nmeshes > 0) {
+        dst->meshes = malloc((size_t)src->nmeshes * sizeof *dst->meshes);
+        if (!dst->meshes) return false;
+        for (int i = 0; i < src->nmeshes; ++i)
+            dst->meshes[i] = ls_mesh_retain(src->meshes[i]);   /* NULL-safe */
     }
     ls_scene_rebuild(dst);
     return true;

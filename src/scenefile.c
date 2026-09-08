@@ -274,6 +274,8 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
 }
 
 void ls_scene_desc_free(SceneDesc *d) {
+    for (int i = 0; i < d->nmeshes; ++i) ls_mesh_release(d->meshes[i]);
+    free(d->meshes);
     free(d->prims); free(d->mats); free(d->names); free(d->lights);
     memset(d, 0, sizeof *d);
 }

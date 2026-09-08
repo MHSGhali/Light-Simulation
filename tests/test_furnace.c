@@ -7,6 +7,7 @@
 #include "test.h"
 #include "tests.h"
 #include "lightsim/integrator.h"
+#include "lightsim/mesh.h"
 #include <string.h>
 
 /* A closed box of six quads, every face sharing one material. */
@@ -30,6 +31,77 @@ static void build_box(Prim *q, ls_real half, int mat_id) {
         q[i].mat_id = mat_id;
         q[i].light_id = -1;
     }
+}
+
+/* The SAME box, as 12 triangles in one mesh.
+ *
+ * `inward` reverses each triangle's winding. It matters: emission is gated on
+ * the raw geometric normal (integrator.c), never on the ray-facing one, so a
+ * box wound outward is a box whose walls do not emit toward the inside. That
+ * makes this a two-sided check on the mesh intersector's normals rather than a
+ * one-sided check that a plausible number came out. */
+static Mesh *build_box_mesh(ls_real h, bool inward) {
+    vec3 v[8] = {
+        v3(-h,-h,-h), v3( h,-h,-h), v3( h, h,-h), v3(-h, h,-h),
+        v3(-h,-h, h), v3( h,-h, h), v3( h, h, h), v3(-h, h, h)
+    };
+    static const int out[36] = {
+        0,3,2, 0,2,1,   4,5,6, 4,6,7,      /* -z, +z */
+        0,1,5, 0,5,4,   3,7,6, 3,6,2,      /* -y, +y */
+        0,4,7, 0,7,3,   1,2,6, 1,6,5       /* -x, +x */
+    };
+    int idx[36];
+    for (int i = 0; i < 12; ++i) {
+        idx[i*3+0] = out[i*3+0];
+        idx[i*3+1] = inward ? out[i*3+2] : out[i*3+1];
+        idx[i*3+2] = inward ? out[i*3+1] : out[i*3+2];
+    }
+    return ls_mesh_build(v, 8, idx, 12);
+}
+
+/* Equilibrium radiance of the mesh box, by the same measurement. One Prim of
+ * kind LS_PRIM_MESH replaces the six quads; everything downstream is identical,
+ * which is the point -- the answer must not move. */
+static double furnace_radiance_mesh(double rho, double le, int max_depth,
+                                    int nrays, Rng *rng, bool inward) {
+    Material m;
+    memset(&m, 0, sizeof m);
+    m.bsdf.kind = LS_BSDF_LAMBERT;
+    m.bsdf.rho  = ls_spectrum_const(rho);
+    m.le        = ls_spectrum_const(le);
+    m.emissive  = true;
+
+    Mesh *mesh = build_box_mesh(1.0, inward);
+    if (!mesh) return -1.0;
+
+    Prim p;
+    memset(&p, 0, sizeof p);
+    p.kind = LS_PRIM_MESH;
+    p.c  = v3(0, 0, 0);
+    p.ex = v3(1, 0, 0);
+    p.ey = v3(0, 1, 0);
+    p.n  = v3(0, 0, 1);
+    p.mat_id = 0;
+    p.light_id = -1;
+    p.mesh_id = 0;
+
+    Scene sc = { .prims = &p, .nprims = 1, .mats = &m, .nmats = 1,
+                 .meshes = &mesh, .nmeshes = 1 };
+
+    SpectrumAcc total = ls_acc_zero();
+    for (int i = 0; i < nrays; ++i) {
+        Ray r;
+        r.o = v3(0, 0, 0);
+        r.d = ls_sample_sphere_uniform(ls_rng_f(rng), ls_rng_f(rng));
+        r.tmin = 0.0;
+        r.tmax = HUGE_VAL;
+        SpectrumAcc acc;
+        ls_trace_radiance(&sc, r, rng, max_depth, LS_STRAT_BSDF, &acc, NULL);
+        for (int b = 0; b < LS_NBINS; ++b) total.v[b] += acc.v[b];
+    }
+    ls_mesh_release(mesh);
+    Spectrum mean = ls_acc_mean(&total, (uint64_t)nrays);
+    return ls_spectrum_integrate(&mean) / (LS_NBINS * LS_SPECTRAL_STEP);
 }
 
 /* Mean radiance seen from the centre of the box, averaged over directions. */
@@ -84,6 +156,43 @@ void test_furnace(void) {
             NOTE("rho=%.2f  L = %.5f  (analytic Le/(1-rho) = %.5f)",
                  cases[i].rho, got, cases[i].want);
         }
+    }
+
+    SECTION("furnace: the same box as a triangle mesh");
+    {
+        /* The gate for the mesh intersector. Six analytic quads and twelve
+         * triangles describe the same enclosure, so they must reach the same
+         * equilibrium -- and reaching it exercises winding, geometric normals,
+         * backface handling, self-intersection offsets and t ordering at once,
+         * over hundreds of bounces, with no new physics to get wrong.
+         *
+         * Same seed sequence and sample count as the quad case above, so the
+         * two numbers are comparable directly and not merely both plausible. */
+        const int NR = 60000, DEPTH = 400;
+        struct { double rho, want; } cases[] = {
+            { 0.0, 1.0 }, { 0.5, 2.0 }, { 0.8, 5.0 }
+        };
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+            Rng qr = ls_rng_seed(0x5DEECE66Dull, 900 + (uint64_t)i);
+            Rng mr = ls_rng_seed(0x5DEECE66Dull, 900 + (uint64_t)i);
+            double quads = furnace_radiance(cases[i].rho, 1.0, DEPTH, NR, &qr);
+            double mesh  = furnace_radiance_mesh(cases[i].rho, 1.0, DEPTH, NR,
+                                                 &mr, true);
+            CHECK_NEAR(mesh, cases[i].want, 8e-3);
+            CHECK_NEAR(mesh, quads, 2e-2);
+            NOTE("rho=%.2f  quads %.5f  mesh %.5f  (analytic %.5f)",
+                 cases[i].rho, quads, mesh, cases[i].want);
+        }
+
+        /* And the normals are not being quietly flipped. Wound the other way
+         * the walls face away from the interior, emission is gated off, and the
+         * enclosure goes black. An intersector that returned a ray-facing
+         * normal would light this up and pass the test above regardless. */
+        Rng br = ls_rng_seed(0x5DEECE66Dull, 77);
+        double backwards = furnace_radiance_mesh(0.5, 1.0, 8, 20000, &br, false);
+        CHECK_NEAR(backwards, 0.0, 1e-12);
+        NOTE("outward-wound box collects %.3g -- emission is one-sided on ng",
+             backwards);
     }
 
     SECTION("furnace: per-depth partial sums");

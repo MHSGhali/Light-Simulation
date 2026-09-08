@@ -546,37 +546,20 @@ static void pick_at(App *a, const Camera *cam, int mx, int my) {
 }
 
 /* The primitive that IS the current selection: a part, or an area light's own
- * emissive face. -1 when the selection has no geometry (a point or spot). */
-static int selection_prim(const App *a) {
-    if (a->sel_light >= 0) return ls_scene_light_prim(&a->d, a->sel_light);
-    if (a->sel_prim  >= 0) return a->sel_prim;
-    return -1;
-}
-
-/* Nearest hit, ignoring one primitive.
+ * emissive face. -1 when the selection has no geometry (a point or spot).
  *
- * A drag slides the selection along the surface under the cursor -- but the
+ * Handed to ls_scene_intersect_ex as the prim to skip while dragging. A drag
+ * slides the selection along the surface under the cursor -- but the
  * selection's OWN surface is under the cursor too, because that is what was
  * grabbed. Letting it answer the query makes the drag chase itself: the hit
  * lands on the near face, the result is offset along that face's normal, which
  * points back at the camera, and so the object advances toward the eye on every
  * motion event for as long as the button is held. Skipping it lands the object
  * on the surface BEHIND it, which is the surface the gesture is about. */
-static bool drag_pick(const App *a, const Ray *ray, int skip, Hit *out) {
-    Ray r = *ray;
-    Hit best;
-    bool found = false;
-    for (int i = 0; i < a->d.scene.nprims; ++i) {
-        if (i == skip) continue;
-        Hit h;
-        if (ls_prim_intersect(&a->d.scene.prims[i], i, &r, &h)) {
-            r.tmax = h.t;
-            best = h;
-            found = true;
-        }
-    }
-    if (found) *out = best;
-    return found;
+static int selection_prim(const App *a) {
+    if (a->sel_light >= 0) return ls_scene_light_prim(&a->d, a->sel_light);
+    if (a->sel_prim  >= 0) return a->sel_prim;
+    return -1;
 }
 
 /* Clearance between the surface under the cursor and the dragged object's
@@ -1558,12 +1541,13 @@ int main(int argc, char **argv) {
                      * surface IS the constraint, which keeps a 3D drag
                      * unambiguous without axis gizmos. The object's own face is
                      * excluded from the query, or the drag walks it into the
-                     * camera -- see drag_pick. */
+                     * camera -- see selection_prim. */
                     Camera cam = active_camera(&a, rw, rh);
                     Ray pr;
                     Hit hh;
                     if (view_pick_ray(&a, &cam, e.motion.x, e.motion.y, &pr) &&
-                        drag_pick(&a, &pr, selection_prim(&a), &hh)) {
+                        ls_scene_intersect_ex(&a.d.scene, &pr,
+                                              selection_prim(&a), &hh)) {
                         vec3 ng = hh.backface ? v3neg(hh.ng) : hh.ng;
                         move_selection(&a, v3add(hh.p, v3scale(ng, drop_clearance(&a))));
                     }

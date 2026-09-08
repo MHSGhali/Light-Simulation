@@ -59,6 +59,16 @@ int  ls_scene_duplicate_light(SceneDesc *d, int index, vec3 offset);
 bool ls_scene_rotate_light(SceneDesc *d, int index, vec3 axis, ls_real angle);
 bool ls_scene_rotate_prim(SceneDesc *d, int index, vec3 axis, ls_real angle);
 
+/* Take ownership of `m` (the caller's reference is consumed) and return its
+ * mesh_id, or -1. The mesh array only ever grows: ls_scene_remove_prim leaves a
+ * NULL hole rather than compacting, so that a mesh_id recorded in an undo
+ * snapshot keeps meaning the same geometry. */
+int  ls_scene_add_mesh(SceneDesc *d, Mesh *m);
+
+/* Add a mesh prim placed at the identity: centred on the origin with the world
+ * axes as its basis. Returns the prim index, or -1. */
+int  ls_scene_add_mesh_prim(SceneDesc *d, Mesh *m, int mat_id);
+
 int  ls_scene_add_material(SceneDesc *d, Material m, const char *name);
 int  ls_scene_add_prim(SceneDesc *d, Prim p);
 void ls_scene_remove_prim(SceneDesc *d, int index);
