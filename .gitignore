@@ -68,3 +68,7 @@ dkms.conf
 
 # Simulation outputs
 /out/
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
