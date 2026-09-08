@@ -422,6 +422,96 @@ void test_scene(void) {
         ls_scene_desc_free(&b);
     }
 
+    SECTION("STL, in both its forms and with its missing units");
+    {
+        /* One tetrahedron, written as ASCII and as binary from the same
+         * numbers. The two must produce identical geometry -- they describe the
+         * same solid, and a reader that disagreed with itself between forms
+         * would be worse than one that failed. */
+        static const double T[4][3][3] = {
+            {{0,0,0},{1,0,0},{0,1,0}}, {{0,0,0},{0,1,0},{0,0,1}},
+            {{0,0,0},{0,0,1},{1,0,0}}, {{1,0,0},{0,1,0},{0,0,1}},
+        };
+        FILE *f = fopen("/tmp/ls_t.stl", "w");
+        if (f) {
+            fputs("solid t\n", f);
+            for (int i = 0; i < 4; ++i) {
+                fputs("facet normal 0 0 0\nouter loop\n", f);
+                for (int k = 0; k < 3; ++k)
+                    fprintf(f, "vertex %.9g %.9g %.9g\n",
+                            T[i][k][0], T[i][k][1], T[i][k][2]);
+                fputs("endloop\nendfacet\n", f);
+            }
+            fputs("endsolid t\n", f);
+            fclose(f);
+        }
+        /* The binary header deliberately begins with "solid", which is exactly
+         * why the ASCII/binary test cannot be that string. The size is what
+         * distinguishes them: 84 + 50n for the count the file declares. */
+        f = fopen("/tmp/ls_t_bin.stl", "wb");
+        if (f) {
+            char head[80];
+            memset(head, 0, sizeof head);
+            memcpy(head, "solid not-really-ascii", 22);
+            fwrite(head, 1, 80, f);
+            uint32_t n = 4;
+            fwrite(&n, 4, 1, f);
+            for (int i = 0; i < 4; ++i) {
+                float z[3] = { 0, 0, 0 };
+                fwrite(z, 4, 3, f);
+                for (int k = 0; k < 3; ++k) {
+                    float v[3] = { (float)T[i][k][0], (float)T[i][k][1],
+                                   (float)T[i][k][2] };
+                    fwrite(v, 4, 3, f);
+                }
+                uint16_t attr = 0;
+                fwrite(&attr, 2, 1, f);
+            }
+            fclose(f);
+        }
+
+        char err[256] = "";
+        Mesh *a1 = ls_stl_load("/tmp/ls_t.stl", 1.0, err);
+        Mesh *b1 = ls_stl_load("/tmp/ls_t_bin.stl", 1.0, err);
+        CHECK(a1 != NULL);
+        CHECK(b1 != NULL);
+        if (a1 && b1) {
+            CHECK(a1->ntris == 4);
+            CHECK(b1->ntris == 4);            /* binary detected despite "solid" */
+            CHECK_NEAR(a1->area, b1->area, 1e-6);
+            CHECK_NEAR(v3dist(a1->lo, b1->lo), 0.0, 1e-6);
+            CHECK_NEAR(v3dist(a1->hi, b1->hi), 0.0, 1e-6);
+            /* Half the unit square, three times, plus the slanted face. */
+            NOTE("STL tetrahedron: ascii area %.6f, binary %.6f", a1->area, b1->area);
+        }
+
+        /* Scale is the whole answer to STL's missing units: it multiplies every
+         * vertex, so a millimetre part becomes a metre one. */
+        Mesh *mm = ls_stl_load("/tmp/ls_t.stl", 0.001, err);
+        CHECK(mm != NULL);
+        if (mm && a1) {
+            CHECK_NEAR(mm->hi.x, a1->hi.x * 0.001, 1e-12);
+            CHECK_NEAR(mm->area, a1->area * 1e-6, 1e-9);   /* area goes as s^2 */
+            CHECK_NEAR(mm->scale, 0.001, 1e-15);
+            ls_mesh_release(mm);
+        }
+        if (a1) ls_mesh_release(a1);
+        if (b1) ls_mesh_release(b1);
+
+        /* Truncated and empty files are refused with a reason, not trusted. */
+        f = fopen("/tmp/ls_t_bad.stl", "w");
+        if (f) { fputs("solid x\nfacet normal 0 0 0\nouter loop\n"
+                       "vertex 0 0 0\nvertex 1 0 0\n", f); fclose(f); }
+        err[0] = '\0';
+        CHECK(ls_stl_load("/tmp/ls_t_bad.stl", 1.0, err) == NULL);
+        CHECK(err[0] != '\0');
+        f = fopen("/tmp/ls_t_empty.stl", "w");
+        if (f) { fputs("solid x\nendsolid x\n", f); fclose(f); }
+        CHECK(ls_stl_load("/tmp/ls_t_empty.stl", 1.0, err) == NULL);
+        remove("/tmp/ls_t.stl"); remove("/tmp/ls_t_bin.stl");
+        remove("/tmp/ls_t_bad.stl"); remove("/tmp/ls_t_empty.stl");
+    }
+
     SECTION("a malformed OBJ is refused, not trusted");
     {
         /* An unchecked face index is the classic way an OBJ reader walks off
@@ -444,19 +534,19 @@ void test_scene(void) {
             fputs(bad[i][1], f);
             fclose(f);
             char err[256] = "";
-            Mesh *m = ls_obj_load(bad[i][0], NULL, err);
+            Mesh *m = ls_obj_load(bad[i][0], NULL, 1.0, err);
             CHECK(m == NULL);
             CHECK(err[0] != '\0');            /* and it says why */
             if (m) ls_mesh_release(m);
             remove(bad[i][0]);
         }
         char err[256] = "";
-        CHECK(ls_obj_load("/tmp/ls_does_not_exist.obj", NULL, err) == NULL);
+        CHECK(ls_obj_load("/tmp/ls_does_not_exist.obj", NULL, 1.0, err) == NULL);
         CHECK(err[0] != '\0');
 
         /* A well-formed file still loads, so the checks above are not just
          * rejecting everything. */
-        Mesh *ok = ls_obj_load("scenes/models/bracket.obj", "post", err);
+        Mesh *ok = ls_obj_load("scenes/models/bracket.obj", "post", 1.0, err);
         CHECK(ok != NULL);
         if (ok) {
             CHECK(ok->ntris == 12);            /* one box of the two */

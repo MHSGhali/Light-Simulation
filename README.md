@@ -67,6 +67,42 @@ you author in, at every tier.
 measurement plane, so walls, parts and luminaire bodies are all measured.
 Hovering reads the value under the cursor.
 
+## Importing geometry
+
+Blender and most CAD tools export OBJ or STL, and either can be dropped straight
+into a scene:
+
+```sh
+./lightsim grid scene.scene --import bracket.obj
+./lightsim grid scene.scene --import part.stl --import-scale 0.001
+```
+
+In the viewer: **drag the file onto the window**, or press `I`. Imports go
+through the same undo as any other edit.
+
+| | OBJ | STL |
+|---|---|---|
+| geometry | yes | yes (ASCII and binary) |
+| materials | `Kd` per `usemtl`, one mesh each | **none at all** — one default grey |
+| units | metres, as Blender writes them | **unspecified** |
+
+**STL has no units.** CAD tools almost universally mean millimetres; Blender
+writes metres. Nothing in the file says which, so nothing can detect it — a part
+imported at face value arrives 1000× too large. Rather than guess, files are
+read as metres and the importer prints what it read:
+
+```
+bracket: 180 x 120 x 160 m        <- millimetres, taken literally
+bracket: 0.18 x 0.12 x 0.16 m     <- the same file, --import-scale 0.001
+```
+
+Refused rather than guessed: `Ke` emissive materials (a mesh emitter is found by
+BSDF sampling but is not in the light list, so the measured grid would read
+systematically low — use `light rect`), `Ks`/`Ns` speculars (there is no honest
+map from a Phong exponent to measured spectral eta/kappa), and vertex normals (a
+shading normal that disagrees with the geometric one breaks energy conservation
+at grazing angles).
+
 ## CLI
 
 ```sh

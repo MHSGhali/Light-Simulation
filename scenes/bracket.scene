@@ -17,8 +17,8 @@ quad wall   0     0.3   0.25   0 -1  0    0.3 0 0     0 0 0.25
 # Two usemtl groups of one OBJ, each its own mesh so each keeps its material.
 # centre, normal, ex, ey -- the object-to-world basis, identity here because
 # the exporter baked the object's world matrix into the vertices.
-mesh plate models/bracket.obj plate   0 0 0   0 0 1   1 0 0   0 1 0
-mesh post  models/bracket.obj post    0 0 0   0 0 1   1 0 0   0 1 0
+mesh plate models/bracket.obj plate 1  0 0 0   0 0 1   1 0 0   0 1 0
+mesh post  models/bracket.obj post  1  0 0 0   0 0 1   1 0 0   0 1 0
 
 light rect -0.12 -0.12 0.45   0.05 0 0   0 -0.05 0   lm 200 daylight 5000
 light rect  0.12 -0.12 0.45   0.05 0 0   0 -0.05 0   lm 200 daylight 5000

@@ -23,6 +23,22 @@
  *   Kd becomes a spectrum through ls_spectrum_from_rgb_reflectance, and the
  *   authored triple is kept on the Material so the scene writer can emit it
  *   back as `material <name> rgb r g b`.
+ *
+ * STL
+ *   Also read, in both its ASCII and binary forms. It is a simpler format and
+ *   a poorer one: no materials at all (not one -- zero), no names, no groups,
+ *   so an STL arrives as a single mesh with a default grey to be replaced by
+ *   hand.
+ *
+ *   AND NO UNITS. This is the trap. STL is unitless by convention and CAD
+ *   tools almost universally mean millimetres, while Blender writes metres.
+ *   Nothing in the file distinguishes them, so nothing can detect it: a part
+ *   exported from a CAD tool arrives 1000x too large and swallows the room.
+ *
+ *   Rather than guess, `scale` is explicit and defaults to 1 (metres, matching
+ *   every other length in this engine), and the importer prints the bounding
+ *   box of what it read. A units mistake then reads as "40 x 25 x 12 m" on the
+ *   way in rather than as a mysteriously black measurement afterwards.
  */
 #ifndef LIGHTSIM_IMPORT_H
 #define LIGHTSIM_IMPORT_H
@@ -40,13 +56,22 @@ void ls_resolve_path(const char *base_dir, const char *rel, char *out, size_t n)
  * built, BVH'd mesh with one reference. NULL on failure, with why in `err`.
  * Vertices are taken as authored -- Blender's exporter bakes the object's world
  * matrix, so the caller places the result at the identity. */
-Mesh *ls_obj_load(const char *path, const char *group, char err[256]);
+Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
+                  char err[256]);
+
+/* An STL, ASCII or binary -- the form is detected from the content, since a
+ * binary STL may also begin with the bytes "solid". One mesh, no material. */
+Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]);
 
 /* Add every usemtl group of `path` to `d` as its own Mesh and Prim, with
  * materials from the sidecar `mtllib` where there is one. One prim per group,
  * because a Prim carries exactly one material.
  *
  * Returns the number of prims added, or -1 with why in `d->err`. */
-int ls_scene_import_obj(SceneDesc *d, const char *path);
+int ls_scene_import_obj(SceneDesc *d, const char *path, ls_real scale);
+
+/* Import any supported geometry file, picking the reader by extension.
+ * `scale` multiplies every vertex; 1.0 means the file is already in metres. */
+int ls_scene_import(SceneDesc *d, const char *path, ls_real scale);
 
 #endif /* LIGHTSIM_IMPORT_H */

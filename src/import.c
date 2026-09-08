@@ -194,7 +194,8 @@ static bool read_obj(const char *path, const char *want, Build *b,
     return ok;
 }
 
-Mesh *ls_obj_load(const char *path, const char *group, char err[256]) {
+Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
+                  char err[256]) {
     Build b;
     memset(&b, 0, sizeof b);
     char mtllib[256] = "";
@@ -208,6 +209,8 @@ Mesh *ls_obj_load(const char *path, const char *group, char err[256]) {
         free(b.v); free(b.idx);
         return NULL;
     }
+    if (scale != 1.0)
+        for (int i = 0; i < b.nv; ++i) b.v[i] = v3scale(b.v[i], scale);
     Mesh *m = ls_mesh_build(b.v, b.nv, b.idx, b.ntri);
     free(b.v); free(b.idx);
     if (!m) { snprintf(err, 256, "'%s' built no usable geometry", path); return NULL; }
@@ -221,6 +224,7 @@ Mesh *ls_obj_load(const char *path, const char *group, char err[256]) {
     if (realpath(path, abs)) snprintf(m->src_path, sizeof m->src_path, "%s", abs);
     else                     snprintf(m->src_path, sizeof m->src_path, "%s", path);
     snprintf(m->group, sizeof m->group, "%s", group ? group : "");
+    m->scale = scale;
     return m;
 }
 
@@ -274,7 +278,7 @@ static int mtl_material(SceneDesc *d, const char *name, ls_real kd[3],
 
 /* ------------------------------------------------------------- scene ---- */
 
-int ls_scene_import_obj(SceneDesc *d, const char *path) {
+int ls_scene_import_obj(SceneDesc *d, const char *path, ls_real scale) {
     /* Pass one: the group names and the mtllib, so each group can be loaded
      * into its own Mesh. */
     Slurp s;
@@ -372,7 +376,7 @@ int ls_scene_import_obj(SceneDesc *d, const char *path) {
         int mat = mtl_material(d, gname ? gname : "imported", kd, emissive, d->err);
         if (mat < 0) return -1;
 
-        Mesh *m = ls_obj_load(path, gname, d->err);
+        Mesh *m = ls_obj_load(path, gname, scale, d->err);
         if (!m) return -1;
         if (ls_scene_add_mesh_prim(d, m, mat) < 0) {
             ls_mesh_release(m);
@@ -382,4 +386,164 @@ int ls_scene_import_obj(SceneDesc *d, const char *path) {
         added++;
     }
     return added;
+}
+
+/* ---------------------------------------------------------------- stl ---- */
+
+/* Binary STL: an 80-byte header, a uint32 triangle count, then 50 bytes per
+ * triangle -- twelve little-endian float32 (a facet normal and three vertices)
+ * plus a uint16 attribute word.
+ *
+ * The header may begin with the bytes "solid", so that string cannot be used to
+ * tell the forms apart. The size does: a binary file is exactly 84 + 50n bytes
+ * for the count it declares, which an ASCII file will not be. */
+static bool stl_is_binary(const unsigned char *buf, size_t len) {
+    if (len < 84) return false;
+    uint32_t n = (uint32_t)buf[80] | ((uint32_t)buf[81] << 8) |
+                 ((uint32_t)buf[82] << 16) | ((uint32_t)buf[83] << 24);
+    return (size_t)84 + (size_t)50 * (size_t)n == len;
+}
+
+static float rd_f32(const unsigned char *p) {
+    uint32_t bits = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    float f;
+    memcpy(&f, &bits, sizeof f);          /* not a cast: that would convert */
+    return f;
+}
+
+static bool stl_binary(const unsigned char *buf, size_t len, Build *b,
+                       char err[256]) {
+    uint32_t n = (uint32_t)buf[80] | ((uint32_t)buf[81] << 8) |
+                 ((uint32_t)buf[82] << 16) | ((uint32_t)buf[83] << 24);
+    (void)len;
+    for (uint32_t i = 0; i < n; ++i) {
+        const unsigned char *t = buf + 84 + (size_t)50 * i;
+        /* The stored facet normal (t[0..11]) is deliberately ignored: exporters
+         * get it wrong often, and geom.h wants the normal the winding implies,
+         * which ls_mesh_build derives. */
+        int base = b->nv;
+        for (int k = 0; k < 3; ++k) {
+            const unsigned char *v = t + 12 + 12 * k;
+            if (!push_vert(b, v3((ls_real)rd_f32(v), (ls_real)rd_f32(v + 4),
+                                 (ls_real)rd_f32(v + 8)))) {
+                snprintf(err, 256, "out of memory"); return false;
+            }
+        }
+        if (!push_tri(b, base, base + 1, base + 2)) {
+            snprintf(err, 256, "out of memory"); return false;
+        }
+    }
+    return true;
+}
+
+static bool stl_ascii(char *buf, size_t len, Build *b, char err[256]) {
+    char *cur = buf, *end = buf + len, *line;
+    int pending = 0, base = 0;
+    while ((line = next_line(&cur, end)) != NULL) {
+        char *lp = line;
+        char *kw = word(&lp);
+        if (!kw || strcmp(kw, "vertex") != 0) continue;
+        char *x = word(&lp), *y = word(&lp), *z = word(&lp);
+        if (!x || !y || !z) {
+            snprintf(err, 256, "vertex needs three numbers");
+            return false;
+        }
+        if (pending == 0) base = b->nv;
+        if (!push_vert(b, v3(atof(x), atof(y), atof(z)))) {
+            snprintf(err, 256, "out of memory"); return false;
+        }
+        if (++pending == 3) {
+            if (!push_tri(b, base, base + 1, base + 2)) {
+                snprintf(err, 256, "out of memory"); return false;
+            }
+            pending = 0;
+        }
+    }
+    if (pending != 0) {
+        snprintf(err, 256, "file ends mid-facet (%d stray vertices)", pending);
+        return false;
+    }
+    return true;
+}
+
+Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]) {
+    Slurp s;
+    if (!slurp(path, &s, err)) return NULL;
+
+    Build b;
+    memset(&b, 0, sizeof b);
+    bool ok = stl_is_binary((const unsigned char *)s.buf, s.len)
+            ? stl_binary((const unsigned char *)s.buf, s.len, &b, err)
+            : stl_ascii(s.buf, s.len, &b, err);
+    free(s.buf);
+    if (!ok) { free(b.v); free(b.idx); return NULL; }
+    if (b.ntri == 0) {
+        snprintf(err, 256, "'%s' has no facets", path);
+        free(b.v); free(b.idx);
+        return NULL;
+    }
+
+    /* STL repeats every vertex per triangle, so a 100k-facet file arrives as
+     * 300k positions. ls_mesh_build copies them as given; the BVH is over
+     * triangles and does not care, so this costs memory and nothing else. */
+    if (scale != 1.0)
+        for (int i = 0; i < b.nv; ++i) b.v[i] = v3scale(b.v[i], scale);
+
+    Mesh *m = ls_mesh_build(b.v, b.nv, b.idx, b.ntri);
+    free(b.v); free(b.idx);
+    if (!m) { snprintf(err, 256, "'%s' built no usable geometry", path); return NULL; }
+    char abs[512];
+    if (realpath(path, abs)) snprintf(m->src_path, sizeof m->src_path, "%s", abs);
+    else                     snprintf(m->src_path, sizeof m->src_path, "%s", path);
+    m->group[0] = '\0';
+    m->scale = scale;
+    return m;
+}
+
+/* ---------------------------------------------------------- dispatch ---- */
+
+static bool ends_with_ci(const char *s, const char *suffix) {
+    size_t n = strlen(s), m = strlen(suffix);
+    if (m > n) return false;
+    for (size_t i = 0; i < m; ++i) {
+        char a = s[n - m + i], c = suffix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != c) return false;
+    }
+    return true;
+}
+
+int ls_scene_import(SceneDesc *d, const char *path, ls_real scale) {
+    if (!ends_with_ci(path, ".stl"))
+        return ls_scene_import_obj(d, path, scale);
+
+    /* An STL carries no material of any kind, so it gets a neutral one to be
+     * replaced by hand. Named after the file so several imports do not collide
+     * on a single "imported". */
+    Mesh *m = ls_stl_load(path, scale, d->err);
+    if (!m) return -1;
+
+    const char *slash = strrchr(path, '/');
+    char name[32];
+    snprintf(name, sizeof name, "%s", slash ? slash + 1 : path);
+    char *dot = strrchr(name, '.');
+    if (dot) *dot = '\0';
+    for (char *q = name; *q; ++q) if (*q == ' ' || *q == '\t' || *q == '#') *q = '_';
+
+    ls_real grey[3] = { 0.5, 0.5, 0.5 };
+    int mat = mtl_material(d, name[0] ? name : "imported", grey, false, d->err);
+    if (mat < 0) { ls_mesh_release(m); return -1; }
+
+    vec3 lo = m->lo, hi = m->hi;
+    if (ls_scene_add_mesh_prim(d, m, mat) < 0) {
+        ls_mesh_release(m);
+        snprintf(d->err, sizeof d->err, "out of memory adding '%s'", path);
+        return -1;
+    }
+    /* The bounding box, because an STL does not say what its numbers mean. A
+     * part exported in millimetres shows up here as tens of metres. */
+    printf("        %s: %.4g x %.4g x %.4g m\n", name,
+           hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+    return 1;
 }

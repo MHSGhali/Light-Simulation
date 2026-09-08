@@ -1320,7 +1320,7 @@ static void app_import(App *a, const char *path) {
     }
     scene_pause(a);
     push_undo(a);
-    int added = ls_scene_import_obj(&a->d, path);
+    int added = ls_scene_import(&a->d, path, 1.0);   /* metres; see import.h */
     scene_resume(a);
     if (added < 0) {
         app_undo(a);              /* nothing was added; drop the snapshot */

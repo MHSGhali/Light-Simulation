@@ -59,6 +59,7 @@ typedef struct {
      * memory, which the writer then has to skip. */
     char     src_path[512];
     char     group[64];
+    ls_real  scale;                /* what src_path's units were multiplied by */
 } Mesh;
 
 /* Copy `verts` and `idx` (3 indices per triangle) into a new mesh and build its
