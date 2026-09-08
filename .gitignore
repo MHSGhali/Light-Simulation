@@ -58,6 +58,7 @@ dkms.conf
 # match the include/lightsim/ header directory)
 /build/
 /lightsim
+/lightsim-view
 /run_tests
 
 # Reference papers: 75 MB of PDFs, two of them unrelated textbooks. Kept out of
