@@ -5,6 +5,12 @@
 *.o
 *.ko
 *.obj
+
+# ...but a Wavefront .obj is geometry, not a compiler artifact, and the two
+# share an extension. Scene models are content and must be tracked, or a fresh
+# clone loses the import fixtures and tests/test_scene.c fails for everyone but
+# the person who created them. Compiler output goes to /build/ anyway.
+!scenes/**/*.obj
 *.elf
 
 # Linker output

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdarg.h>
 
 #include "lightsim/scenefile.h"
 #include "lightsim/sceneedit.h"
@@ -25,6 +26,7 @@
 #include "lightsim/film.h"
 #include "lightsim/thread.h"
 #include "lightsim/export.h"
+#include "lightsim/import.h"
 #include "ui.h"
 #include "inspect.h"
 #include "draw.h"
@@ -136,7 +138,23 @@ typedef struct {
     atomic_bool paused, acked;
 
     const char *scene_path;
+
+    /* A transient message under the canvas. Everything else this viewer says
+     * ("wrote out/...", "selected light 3") goes to stdout, which a user who
+     * launched from the Finder never sees. An import that silently failed
+     * would be the worst instance of that. */
+    char   status[128];
+    Uint32 status_at;
 } App;
+
+static void say(App *a, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(a->status, sizeof a->status, fmt, ap);
+    va_end(ap);
+    a->status_at = SDL_GetTicks();
+    printf("%s\n", a->status);
+}
 
 /* ------------------------------------------------------------------ grid */
 
@@ -671,6 +689,35 @@ static void draw_overlay(SDL_Renderer *ren, const App *a, const Camera *cam) {
                           v3sub(v3sub(p->c, p->ex), p->ey),
                           v3add(v3sub(p->c, p->ex), p->ey) };
             overlay_loop(ren, a, cam, q, 4, COL_ACCENT, 255);
+        } else if (p->kind == LS_PRIM_MESH && p->mesh_id >= 0 &&
+                   p->mesh_id < a->d.nmeshes && a->d.meshes[p->mesh_id]) {
+            /* An imported mesh has no single outline worth drawing, so show its
+             * bounding box, carried through the same object-to-world basis the
+             * intersector uses. It also makes the transform visible: a rotated
+             * mesh has a visibly rotated box. */
+            const Mesh *m = a->d.meshes[p->mesh_id];
+            vec3 lo = m->lo, hi = m->hi, corner[8];
+            for (int k = 0; k < 8; ++k) {
+                vec3 o = v3((k & 1) ? hi.x : lo.x,
+                            (k & 2) ? hi.y : lo.y,
+                            (k & 4) ? hi.z : lo.z);
+                corner[k] = v3add(p->c, v3add(v3scale(p->ex, o.x),
+                                   v3add(v3scale(p->ey, o.y), v3scale(p->n, o.z))));
+            }
+            /* Four faces trace all twelve edges without repeating one. */
+            const int face[3][4] = { {0,1,3,2}, {4,5,7,6}, {0,1,5,4} };
+            for (int fi = 0; fi < 3; ++fi) {
+                vec3 q[4] = { corner[face[fi][0]], corner[face[fi][1]],
+                              corner[face[fi][2]], corner[face[fi][3]] };
+                overlay_loop(ren, a, cam, q, 4, COL_ACCENT, 255);
+            }
+            const int rung[2][2] = { {2,6}, {3,7} };
+            for (int ri = 0; ri < 2; ++ri) {
+                int x0, y0, x1, y1;
+                if (project_view(a, cam, corner[rung[ri][0]], &x0, &y0) &&
+                    project_view(a, cam, corner[rung[ri][1]], &x1, &y1))
+                    draw_line(ren, x0, y0, x1, y1, COL_ACCENT, 255);
+            }
         } else {
             int sx, sy;
             if (project_view(a, cam, p->c, &sx, &sy))
@@ -1251,6 +1298,68 @@ static void save_scene(App *a) {
     else fprintf(stderr, "could not write %s\n", path);
 }
 
+/* Bring in an OBJ, or open a whole .scene. Goes through the same
+ * pause/snapshot/resume discipline as every other edit, so ^Z undoes an import
+ * in one step and the render thread is never reading a half-built scene. */
+static void app_import(App *a, const char *path) {
+    size_t n = strlen(path);
+    if (n > 6 && strcmp(path + n - 6, ".scene") == 0) {
+        SceneDesc nd;
+        if (!ls_scene_load(&nd, path)) { say(a, "%s", nd.err); return; }
+        scene_pause(a);
+        push_undo(a);
+        ls_scene_desc_free(&a->d);
+        a->d = nd;
+        ls_scene_rebuild(&a->d);
+        a->sel_light = a->d.nlights > 0 ? 0 : -1;
+        a->sel_prim = -1;
+        scene_resume(a);
+        solve_and_refresh(a);
+        say(a, "OPENED %s", path);
+        return;
+    }
+    scene_pause(a);
+    push_undo(a);
+    int added = ls_scene_import_obj(&a->d, path);
+    scene_resume(a);
+    if (added < 0) {
+        app_undo(a);              /* nothing was added; drop the snapshot */
+        say(a, "%s", a->d.err);
+        return;
+    }
+    /* Select the first thing that arrived, so the inspector has something to
+     * show and the gizmo lands on it. */
+    for (int i = a->d.nprims - 1; i >= 0; --i)
+        if (a->d.prims[i].kind == LS_PRIM_MESH) { a->sel_prim = i; a->sel_light = -1; }
+    solve_and_refresh(a);
+    say(a, "IMPORTED %d MESH%s FROM %s", added, added == 1 ? "" : "ES", path);
+}
+
+/* A file chooser without a dependency. SDL2 has none, and this project has no
+ * third-party code beyond SDL, so on macOS ask the system for one. Anywhere
+ * else, say so and point at drag and drop, which always works. */
+static void app_import_dialog(App *a) {
+#ifdef __APPLE__
+    FILE *p = popen("osascript -e 'POSIX path of (choose file with prompt "
+                    "\"Import geometry\" of type {\"obj\", \"scene\"})' "
+                    "2>/dev/null", "r");
+    if (!p) { say(a, "COULD NOT OPEN A FILE CHOOSER -- DRAG A FILE IN"); return; }
+    char path[1024];
+    if (fgets(path, sizeof path, p)) {
+        size_t n = strlen(path);
+        while (n > 0 && (path[n-1] == '\n' || path[n-1] == '\r')) path[--n] = '\0';
+        pclose(p);
+        if (n > 0) app_import(a, path);
+        return;
+    }
+    pclose(p);
+    say(a, "IMPORT CANCELLED");
+#else
+    (void)a;
+    say(a, "DRAG AN .OBJ ONTO THE WINDOW TO IMPORT");
+#endif
+}
+
 static void export_blender(App *a) {
     const char *unit = ls_quantity_unit(LS_Q_IRRADIANCE,
         a->st.photometric ? LS_UNITS_PHOTOMETRIC : LS_UNITS_RADIOMETRIC);
@@ -1268,7 +1377,8 @@ int main(int argc, char **argv) {
             printf("  With no scene file, opens an empty stage to build on.\n\n");
             printf("  VIEW    1 3D perspective   2 orthographic plan\n");
     printf("  SHOW    3 illuminance on every surface (toggle)\n");
-            printf("  EDIT    A add light   P add part   D duplicate   DEL delete\n");
+            printf("  EDIT    A add light   P add part   I import OBJ   D duplicate\n");
+            printf("          DEL delete   (or drag an .obj/.scene onto the window)\n");
             printf("          TAB cycle selection   ^Z undo   ^Y redo\n");
             printf("          U lux/watt   T full/direct   Q draft/fine\n");
             printf("          V tier: simple / advanced / scientific\n");
@@ -1369,6 +1479,7 @@ int main(int argc, char **argv) {
      * below in window units and lets SDL scale up, which also keeps the result
      * crisp rather than upscaled. */
     SDL_RenderSetLogicalSize(ren, WIN_W, WIN_H);
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);   /* drag an .obj onto the window */
 
     ui_init(&a.t);
     SDL_StartTextInput();
@@ -1411,6 +1522,12 @@ int main(int argc, char **argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
+            else if (e.type == SDL_DROPFILE) {
+                /* The gesture people actually reach for. SDL hands us a string
+                 * it allocated; we own it. */
+                app_import(&a, e.drop.file);
+                SDL_free(e.drop.file);
+            }
             else if (e.type == SDL_KEYDOWN) {
                 switch (e.key.keysym.sym) {
                     case SDLK_ESCAPE:
@@ -1492,6 +1609,7 @@ int main(int argc, char **argv) {
                         if (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI)) app_redo(&a);
                         break;
                     case SDLK_b: export_blender(&a); break;
+                    case SDLK_i: app_import_dialog(&a); break;
                     default: break;
                 }
             }
@@ -1606,6 +1724,7 @@ int main(int argc, char **argv) {
                         case UI_SAVE:        save_outputs(&a); break;
                         case UI_SAVE_SCENE:  save_scene(&a); break;
                         case UI_BLENDER:     export_blender(&a); break;
+                        case UI_IMPORT:      app_import_dialog(&a); break;
                         default: break;
                     }
                 } else {
@@ -1766,7 +1885,9 @@ int main(int argc, char **argv) {
                               a.heat_lo, a.heat_hi, unit);
 
             int hint_y = a.view_y + side_c + (a.shade_heat ? CBAR_H + 26 : 12);
-            if (a.tool != UI_TOOL_NONE) {
+            if (a.status[0] && SDL_GetTicks() - a.status_at < 6000) {
+                draw_text(ren, a.view_x, hint_y, 1, a.status, COL_ACCENT, 255);
+            } else if (a.tool != UI_TOOL_NONE) {
                 snprintf(buf, sizeof buf, "CLICK TO PLACE %s   ESC CANCELS",
                          a.tool == UI_TOOL_LIGHT ? "LIGHT" : "PART");
                 draw_text(ren, a.view_x, hint_y, 1, buf, COL_ACCENT, 255);

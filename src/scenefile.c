@@ -2,6 +2,8 @@
 #include "lightsim/sceneedit.h"
 #include "lightsim/units.h"
 #include "lightsim/bsdf.h"
+#include "lightsim/color.h"
+#include "lightsim/import.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +140,10 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
     buf[got] = '\0';
     fclose(fp);
 
+    /* Everything a `mesh` path is resolved against. Set before parsing, since
+     * a mesh directive loads its geometry as it is read. */
+    ls_dir_of(path, d->base_dir, sizeof d->base_dir);
+
     P p = { buf, buf + got, d, true };
     char *t;
     while (p.ok && (t = tok(&p)) != NULL) {
@@ -171,6 +177,14 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
                 else                                        { ls_metal_aluminium(&m.bsdf.eta, &m.bsdf.kappa);
                                                               snprintf(m.metal, sizeof m.metal, "al"); }
                 m.bsdf.alpha = num(&p);
+            } else if (strcmp(kind, "rgb") == 0) {
+                /* An imported colour. The authored triple is kept so the writer
+                 * can emit it back; the spectrum is derived from it. */
+                m.bsdf.kind = LS_BSDF_LAMBERT;
+                m.rgb[0] = num(&p); m.rgb[1] = num(&p); m.rgb[2] = num(&p);
+                m.from_rgb = true;
+                RGB c = { m.rgb[0], m.rgb[1], m.rgb[2] };
+                m.bsdf.rho = ls_spectrum_from_rgb_reflectance(c);
             } else if (strcmp(kind, "emit") == 0) {
                 m.bsdf.kind = LS_BSDF_LAMBERT;
                 m.bsdf.rho = ls_spectrum_zero();
@@ -185,8 +199,38 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             d->mats[d->nmats] = m;
             snprintf(d->names[d->nmats], 32, "%s", name);
             d->nmats++;
+        } else if (strcmp(t, "mesh") == 0) {
+            char *mname = tok(&p);
+            int mid = mname ? find_mat(d, mname) : -1;
+            if (mid < 0) { p.ok = false;
+                snprintf(d->err, sizeof d->err, "unknown material '%s'",
+                         mname ? mname : "(none)"); break; }
+            char *mpath = tok(&p);          /* not `path`: that is the scene's */
+            char *group = tok(&p);
+            if (!mpath || !group) { p.ok = false;
+                snprintf(d->err, sizeof d->err, "mesh needs a path and a group");
+                break; }
+            /* Copy before the next token: tok() writes NULs into the buffer. */
+            char pbuf[512], gbuf[64];
+            snprintf(pbuf, sizeof pbuf, "%s", mpath);
+            snprintf(gbuf, sizeof gbuf, "%s", group);
+            Prim pr;
+            memset(&pr, 0, sizeof pr);
+            pr.kind = LS_PRIM_MESH;
+            pr.c = vec(&p); pr.n = vec(&p); pr.ex = vec(&p); pr.ey = vec(&p);
+            pr.mat_id = mid;
+            pr.light_id = -1;
+            if (!p.ok) break;
+            char resolved[1024];
+            ls_resolve_path(d->base_dir, pbuf, resolved, sizeof resolved);
+            Mesh *msh = ls_obj_load(resolved,
+                                    strcmp(gbuf, "-") ? gbuf : NULL, d->err);
+            if (!msh) { p.ok = false; break; }
+            pr.mesh_id = ls_scene_add_mesh(d, msh);
+            if (pr.mesh_id < 0) { ls_mesh_release(msh); p.ok = false; break; }
+            add_prim(d, pr);
         } else if (strcmp(t, "plane") == 0 || strcmp(t, "quad") == 0 ||
-                   strcmp(t, "sphere") == 0) {
+                   strcmp(t, "disk") == 0 || strcmp(t, "sphere") == 0) {
             char *mname = tok(&p);
             int mid = mname ? find_mat(d, mname) : -1;
             if (mid < 0) { p.ok = false;
@@ -201,6 +245,9 @@ bool ls_scene_load(SceneDesc *d, const char *path) {
             } else if (strcmp(t, "quad") == 0) {
                 pr.kind = LS_PRIM_QUAD; pr.c = vec(&p); pr.n = v3norm(vec(&p));
                 pr.ex = vec(&p); pr.ey = vec(&p);
+            } else if (strcmp(t, "disk") == 0) {
+                pr.kind = LS_PRIM_DISK; pr.c = vec(&p); pr.n = v3norm(vec(&p));
+                pr.r = num(&p);
             } else {
                 pr.kind = LS_PRIM_SPHERE; pr.c = vec(&p); pr.r = num(&p);
             }
@@ -282,6 +329,14 @@ void ls_scene_desc_free(SceneDesc *d) {
 
 /* ------------------------------------------------------------------ writer */
 
+/* Full precision, for numbers a gesture produced rather than a person.
+ * The round-trip test asserts the reloaded scene SIMULATES identically to
+ * 1e-12, which %.6g cannot deliver for a gizmo-rotated basis. Kept separate
+ * from wvec so hand-authored scenes stay short and diffable. */
+static void wvec17(FILE *f, vec3 v) {
+    fprintf(f, " %.17g %.17g %.17g", v.x, v.y, v.z);
+}
+
 static void wvec(FILE *f, vec3 v) {
     fprintf(f, " %.6g %.6g %.6g", v.x, v.y, v.z);
 }
@@ -322,6 +377,9 @@ bool ls_scene_save(const SceneDesc *d, const char *path) {
         else if (m->bsdf.kind == LS_BSDF_CONDUCTOR)
             fprintf(f, "material %s metal %s %.6g\n", d->names[i],
                     m->metal[0] ? m->metal : "al", m->bsdf.alpha);
+        else if (m->from_rgb)
+            fprintf(f, "material %s rgb %.6g %.6g %.6g\n", d->names[i],
+                    m->rgb[0], m->rgb[1], m->rgb[2]);
         else
             fprintf(f, "material %s lambert %.6g\n", d->names[i],
                     ls_spectrum_mean(&m->bsdf.rho));
@@ -344,14 +402,19 @@ bool ls_scene_save(const SceneDesc *d, const char *path) {
                 fprintf(f, "sphere %s", mat); wvec(f, p->c);
                 fprintf(f, " %.6g\n", p->r); break;
             case LS_PRIM_DISK:
-                /* Not a parseable primitive directive today; skip rather than
-                 * write something the loader would reject. */
+                fprintf(f, "disk %s", mat);   wvec(f, p->c); wvec(f, p->n);
+                fprintf(f, " %.6g\n", p->r); break;
+            case LS_PRIM_MESH: {
+                const Mesh *m = (p->mesh_id >= 0 && p->mesh_id < d->nmeshes)
+                              ? d->meshes[p->mesh_id] : NULL;
+                if (!m) break;                       /* a deleted mesh's hole */
+                fprintf(f, "mesh %s %s %s", mat, m->src_path,
+                        m->group[0] ? m->group : "-");
+                wvec17(f, p->c); wvec17(f, p->n);
+                wvec17(f, p->ex); wvec17(f, p->ey);
+                fprintf(f, "\n");
                 break;
-            case LS_PRIM_MESH:
-                /* The `mesh` directive lands with the OBJ importer; until then
-                 * a mesh has no textual form, so skip it rather than write
-                 * something that would not load. */
-                break;
+            }
         }
     }
 

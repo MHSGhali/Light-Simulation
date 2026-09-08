@@ -10,6 +10,7 @@
 #include <string.h>
 #include "lightsim/units.h"
 #include "lightsim/mesh.h"
+#include "lightsim/import.h"
 
 /* Set a light's luminous flux the way the inspector does: the authored value is
  * what the user asked for, and the watts follow from the spectrum. */
@@ -419,6 +420,122 @@ void test_scene(void) {
 
         ls_scene_desc_free(&a);
         ls_scene_desc_free(&b);
+    }
+
+    SECTION("a malformed OBJ is refused, not trusted");
+    {
+        /* An unchecked face index is the classic way an OBJ reader walks off
+         * its own heap, so every failure here must be a clean false with a
+         * message -- and under `make test-asan`, no leak either. */
+        const char *bad[][2] = {
+            { "/tmp/ls_bad_index.obj",
+              "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 9\n" },
+            { "/tmp/ls_bad_negative.obj",
+              "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 -9\n" },
+            { "/tmp/ls_bad_short.obj",
+              "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\n" },
+            { "/tmp/ls_bad_empty.obj",  "" },
+            { "/tmp/ls_bad_novert.obj", "f 1 2 3\n" },
+            { "/tmp/ls_bad_vshort.obj", "v 0 0\nf 1 1 1\n" },
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+            FILE *f = fopen(bad[i][0], "w");
+            if (!f) continue;
+            fputs(bad[i][1], f);
+            fclose(f);
+            char err[256] = "";
+            Mesh *m = ls_obj_load(bad[i][0], NULL, err);
+            CHECK(m == NULL);
+            CHECK(err[0] != '\0');            /* and it says why */
+            if (m) ls_mesh_release(m);
+            remove(bad[i][0]);
+        }
+        char err[256] = "";
+        CHECK(ls_obj_load("/tmp/ls_does_not_exist.obj", NULL, err) == NULL);
+        CHECK(err[0] != '\0');
+
+        /* A well-formed file still loads, so the checks above are not just
+         * rejecting everything. */
+        Mesh *ok = ls_obj_load("scenes/models/bracket.obj", "post", err);
+        CHECK(ok != NULL);
+        if (ok) {
+            CHECK(ok->ntris == 12);            /* one box of the two */
+            CHECK(strstr(ok->src_path, "bracket.obj") != NULL);
+            CHECK(strcmp(ok->group, "post") == 0);
+            ls_mesh_release(ok);
+        }
+    }
+
+    SECTION("an imported mesh survives save and reload");
+    {
+        /* The step most likely to fail for reasons that have nothing to do with
+         * geometry: a relative mesh path resolved against the wrong directory,
+         * or a transform truncated by the writer's %.6g. Both would present as
+         * "meshes broke the round trip" while being pure file-format bugs, so
+         * this holds them to the same bar as every other directive -- not just
+         * that the fields match, but that the reloaded scene SIMULATES the
+         * same. */
+        SceneDesc a, b;
+        if (!ls_scene_load(&a, "scenes/bracket.scene")) {
+            printf("  SKIP: %s\n", a.err);
+        } else {
+            CHECK(a.nmeshes == 2);
+            CHECK(a.nprims > 0);
+            int nmesh_prims = 0;
+            for (int i = 0; i < a.nprims; ++i)
+                if (a.prims[i].kind == LS_PRIM_MESH) nmesh_prims++;
+            CHECK(nmesh_prims == 2);
+
+            /* The imported colours are stored as authored, so the writer can
+             * emit `rgb` rather than 95 bins it could never parse back. */
+            int nrgb = 0;
+            for (int i = 0; i < a.nmats; ++i) if (a.mats[i].from_rgb) nrgb++;
+            CHECK(nrgb == 2);
+
+            /* Rotate a mesh first, so the transform written out is one a
+             * gesture would produce rather than a round number. */
+            int mi = -1;
+            for (int i = 0; i < a.nprims; ++i)
+                if (a.prims[i].kind == LS_PRIM_MESH) { mi = i; break; }
+            CHECK(mi >= 0);
+            CHECK(ls_scene_rotate_prim(&a, mi, v3(0.3, 0.5, 0.81), 0.7));
+
+            CHECK(ls_scene_save(&a, "/tmp/lightsim_mesh_roundtrip.scene"));
+            CHECK(ls_scene_load(&b, "/tmp/lightsim_mesh_roundtrip.scene"));
+            CHECK(b.nmeshes == a.nmeshes);
+            CHECK(b.nprims == a.nprims);
+            CHECK(b.nmats == a.nmats);
+
+            /* The transform survived the writer exactly. */
+            CHECK_NEAR(v3dist(b.prims[mi].ex, a.prims[mi].ex), 0.0, 1e-15);
+            CHECK_NEAR(v3dist(b.prims[mi].n,  a.prims[mi].n),  0.0, 1e-15);
+
+            /* And the scene measures the same.
+             *
+             * The point is chosen just off the plate's edge (it spans x +/-0.09,
+             * y +/-0.06), so it is lit but partly shaded by the mesh. Directly
+             * underneath, the reading is a clean zero -- and comparing zero to
+             * zero would pass whether or not the geometry loaded at all, which
+             * is the trap this assertion exists to avoid. */
+            vec3 probe_p = v3(0.16, 0.0, 0.001);
+            double ia = probe(&a, probe_p), ib = probe(&b, probe_p);
+            CHECK(ia > 0.0);                       /* the test has teeth */
+            CHECK_NEAR(ib, ia, 1e-12);
+
+            /* Shown against the same point with no mesh at all, so the number
+             * above is visibly doing work. */
+            SceneDesc bare;
+            if (ls_scene_load(&bare, SCENE_IN)) {
+                double ic = probe(&bare, probe_p);
+                NOTE("at (0.16, 0, 0): %.6f with the imported bracket, "
+                     "%.6f without", ia, ic);
+                CHECK(fabs(ia - ic) > 1e-6);       /* the mesh changes the field */
+                ls_scene_desc_free(&bare);
+            }
+
+            ls_scene_desc_free(&b);
+            ls_scene_desc_free(&a);
+        }
     }
 
     SECTION("mesh geometry is shared by snapshots, not copied");

@@ -32,6 +32,7 @@ void ui_init(Toolbar *t) {
     add(t, UI_TIER,        "SIMPLE",    "V", false, &y);
     add(t, UI_ADD_LIGHT,   "ADD LIGHT", "A", true,  &y);
     add(t, UI_ADD_PART,    "ADD PART",  "P", false, &y);
+    add(t, UI_IMPORT,      "IMPORT",    "I", false, &y);
     add(t, UI_DUPLICATE,   "DUPLICATE", "D", false, &y);
     add(t, UI_DELETE,      "DELETE",    "DEL", false, &y);
     add(t, UI_UNDO,        "UNDO",      "^Z", true,  &y);
@@ -128,6 +129,12 @@ void ui_apply_state(Toolbar *t, UiState s) {
                 break;
             case UI_REDO:
                 b->enabled = s.can_redo;
+                b->active = false;
+                break;
+            case UI_IMPORT:
+                /* Always available: an import needs no selection and no grid,
+                 * and dropping a file on the window does the same thing. */
+                b->enabled = true;
                 b->active = false;
                 break;
             case UI_SAVE:

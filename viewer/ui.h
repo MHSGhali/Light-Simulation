@@ -33,6 +33,7 @@ typedef enum {
     UI_SAVE,
     UI_SAVE_SCENE,
     UI_BLENDER,
+    UI_IMPORT,
     UI_ACTION_COUNT
 } UiAction;
 

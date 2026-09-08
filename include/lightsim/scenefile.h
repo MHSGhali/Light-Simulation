@@ -4,11 +4,14 @@
  *   camera   <eye xyz> <target xyz> <fov_y_deg> <width> <height>
  *   grid     <origin xyz> <edge_u xyz> <edge_v xyz> <nu> <nv>
  *   material <name> lambert <albedo>
+ *   material <name> rgb     <r> <g> <b>      # sRGB, uplifted to a spectrum
  *   material <name> metal   <al|cu|au> <alpha>
  *   material <name> emit    <radiance>
  *   plane    <mat> <centre xyz> <normal xyz>
  *   quad     <mat> <centre xyz> <normal xyz> <half_u xyz> <half_v xyz>
  *   sphere   <mat> <centre xyz> <radius>
+ *   disk     <mat> <centre xyz> <normal xyz> <radius>
+ *   mesh     <mat> <path.obj> <group> <centre xyz> <normal xyz> <ex xyz> <ey xyz>
  *   light point  <xyz> <W|lm> <value> <spd>
  *   light spot   <xyz> <dir xyz> <total_deg> <falloff_deg> <W|lm> <value> <spd>
  *   light rect   <centre xyz> <half_u xyz> <half_v xyz> <W|lm> <value> <spd>
@@ -50,6 +53,10 @@ typedef struct {
      * copied 64 times is gigabytes. Sound only because a Mesh is immutable
      * after ls_mesh_build; placement lives on the Prim. */
     Mesh    **meshes;  int nmeshes, cap_meshes;
+    /* Directory of the scene file, so a relative `mesh` path resolves against
+     * the scene rather than the working directory. The writer emits resolved
+     * absolute paths, so a scene saved anywhere still finds its geometry. */
+    char      base_dir[512];
     char      err[256];
 } SceneDesc;
 

@@ -14,6 +14,12 @@ typedef struct {
     Spectrum le;        /* emitted radiance W/(m^2 sr nm); zero if not emissive */
     bool     emissive;
     char     metal[8];  /* conductor preset ("al"/"cu"/"au"), for round-tripping */
+    /* An imported colour, kept as authored so the writer can emit `rgb r g b`
+     * rather than 95 bins. The uplift is not invertible in general, so the
+     * spectrum must never be the source of truth for a material that came in
+     * as a colour. Same reason metal[8] exists. */
+    ls_real  rgb[3];
+    bool     from_rgb;
 } Material;
 
 typedef struct {

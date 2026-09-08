@@ -46,6 +46,7 @@ typedef enum {
     /* ---- part ---- */
     FLD_P_KIND, FLD_P_X, FLD_P_Y, FLD_P_Z,
     FLD_P_RADIUS, FLD_P_SIZEU, FLD_P_SIZEV,
+    FLD_P_TRIS, FLD_P_AREA,
     FLD_M_KIND, FLD_M_ALBEDO, FLD_M_ROUGH, FLD_M_METAL,
     FLD_COUNT
 } FieldId;

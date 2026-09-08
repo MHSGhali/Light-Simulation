@@ -1,0 +1,52 @@
+/* import.h — bringing geometry in from elsewhere.
+ *
+ * WHAT COMES BACK, AND WHAT DOES NOT
+ *   Blender writes OBJ natively, so that is the road in. An OBJ carries
+ *   vertices, faces and a material name; it does not carry spectra, lights,
+ *   cameras or units. So this module reads geometry and a base colour, and
+ *   everything physical stays authored in the .scene file beside it.
+ *
+ *   Deliberately refused rather than guessed:
+ *     Ke  emissive materials. A mesh emitter is found by BSDF sampling but is
+ *         NOT in the light list, so ls_estimate_irradiance would miss it
+ *         entirely and ls_estimate_irradiance_full would discard its first-hit
+ *         emission as "already counted by direct sampling" -- which for a mesh
+ *         it never was. The grid would come out systematically low with a
+ *         plausible-looking number and no test firing. Use `light rect`.
+ *     Ks/Ns  speculars. LS_BSDF_CONDUCTOR takes measured spectral eta/kappa;
+ *         there is no honest map from a Phong exponent to it. Write
+ *         `material steel metal al 0.15` by hand instead.
+ *     vn  vertex normals. geom.h requires the raw geometric normal, and a
+ *         shading normal that disagrees with it breaks energy conservation at
+ *         grazing angles. This simulator's output is a number, not a picture.
+ *
+ *   Kd becomes a spectrum through ls_spectrum_from_rgb_reflectance, and the
+ *   authored triple is kept on the Material so the scene writer can emit it
+ *   back as `material <name> rgb r g b`.
+ */
+#ifndef LIGHTSIM_IMPORT_H
+#define LIGHTSIM_IMPORT_H
+
+#include "scenefile.h"
+
+/* Directory containing `path`, with the trailing separator removed. "" when
+ * `path` has no directory part. */
+void ls_dir_of(const char *path, char *out, size_t n);
+
+/* `rel` resolved against `base_dir`, unless it is already absolute. */
+void ls_resolve_path(const char *base_dir, const char *rel, char *out, size_t n);
+
+/* One `usemtl` group of an OBJ (or the whole file when `group` is NULL) as a
+ * built, BVH'd mesh with one reference. NULL on failure, with why in `err`.
+ * Vertices are taken as authored -- Blender's exporter bakes the object's world
+ * matrix, so the caller places the result at the identity. */
+Mesh *ls_obj_load(const char *path, const char *group, char err[256]);
+
+/* Add every usemtl group of `path` to `d` as its own Mesh and Prim, with
+ * materials from the sidecar `mtllib` where there is one. One prim per group,
+ * because a Prim carries exactly one material.
+ *
+ * Returns the number of prims added, or -1 with why in `d->err`. */
+int ls_scene_import_obj(SceneDesc *d, const char *path);
+
+#endif /* LIGHTSIM_IMPORT_H */

@@ -54,6 +54,11 @@ typedef struct {
     BvhNode *nodes;   int nnodes;
     vec3     lo, hi;               /* object-space AABB (== nodes[0]) */
     ls_real  area;                 /* sum of triangle areas, cached */
+    /* Where it came from, so the scene writer can name the file rather than
+     * serialise the vertices. Set by the importer; empty for a mesh built in
+     * memory, which the writer then has to skip. */
+    char     src_path[512];
+    char     group[64];
 } Mesh;
 
 /* Copy `verts` and `idx` (3 indices per triangle) into a new mesh and build its

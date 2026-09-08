@@ -8,7 +8,7 @@ static const char *const KIND_NAMES[] = { "POINT", "SUN", "SPOT", "SPHERE", "DIS
 static const char *const SPD_NAMES[]  = { "FLAT", "BLACKBODY", "DAYLIGHT", "LED" };
 static const char *const MAT_NAMES[]  = { "LAMBERT", "METAL" };
 static const char *const METAL_NAMES[]= { "AL", "CU", "AU" };
-static const char *const PRIM_NAMES[] = { "SPHERE", "PLANE", "DISK", "QUAD" };
+static const char *const PRIM_NAMES[] = { "SPHERE", "PLANE", "DISK", "QUAD", "MESH" };
 
 static void push(Field *out, int max, int *n, Field f) {
     if (*n < max) out[(*n)++] = f;
@@ -177,6 +177,15 @@ int ls_inspect_fields(const SceneDesc *d, int sel_light, int sel_prim,
             push(out, max, &n, val(FLD_P_SIZEV, "HEIGHT", "M",
                                    2.0 * v3len(p->ey), 1e-4, 100.0));
         }
+        if (p->kind == LS_PRIM_MESH && p->mesh_id >= 0 &&
+            p->mesh_id < d->nmeshes && d->meshes[p->mesh_id]) {
+            /* Imported geometry is read-only here: its size and shape came from
+             * the file, and the editable placement is the X/Y/Z above plus the
+             * gizmo. Showing the count is what tells you the import worked. */
+            const Mesh *msh = d->meshes[p->mesh_id];   /* `m` is the Material */
+            push(out, max, &n, ro(FLD_P_TRIS, "TRIANGLES", "", (double)msh->ntris));
+            if (adv) push(out, max, &n, ro(FLD_P_AREA, "SURFACE AREA", "M2", msh->area));
+        }
 
         push(out, max, &n, head("MATERIAL"));
         int mk = (m->bsdf.kind == LS_BSDF_CONDUCTOR) ? 1 : 0;
@@ -206,7 +215,7 @@ void ls_inspect_format(const Field *f, char *buf, size_t n) {
     }
     if (f->id == FLD_P_KIND) {
         int i = (int)(f->value + 0.5);
-        snprintf(buf, n, "%s", (i >= 0 && i < 4) ? PRIM_NAMES[i] : "?");
+        snprintf(buf, n, "%s", (i >= 0 && i < 5) ? PRIM_NAMES[i] : "?");
         return;
     }
     double v = fabs(f->value);

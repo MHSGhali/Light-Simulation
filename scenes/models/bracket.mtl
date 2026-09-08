@@ -1,0 +1,10 @@
+# Material Count: 2
+newmtl plate
+Kd 0.75 0.72 0.68
+Ks 0.1 0.1 0.1
+Ns 96.0
+
+newmtl post
+Kd 0.20 0.45 0.85
+Ks 0.0 0.0 0.0
+Ns 1.0
