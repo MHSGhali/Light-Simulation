@@ -56,12 +56,11 @@ void ls_resolve_path(const char *base_dir, const char *rel, char *out, size_t n)
  * built, BVH'd mesh with one reference. NULL on failure, with why in `err`.
  * Vertices are taken as authored -- Blender's exporter bakes the object's world
  * matrix, so the caller places the result at the identity. */
-Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
-                  char err[256]);
+Mesh *ls_obj_load(const char *path, const char *group, char err[256]);
 
 /* An STL, ASCII or binary -- the form is detected from the content, since a
  * binary STL may also begin with the bytes "solid". One mesh, no material. */
-Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]);
+Mesh *ls_stl_load(const char *path, char err[256]);
 
 /* Add every usemtl group of `path` to `d` as its own Mesh and Prim, with
  * materials from the sidecar `mtllib` where there is one. One prim per group,
@@ -73,7 +72,8 @@ int ls_scene_import_obj_at(SceneDesc *d, const char *path, ls_real scale,
                            const vec3 *at);
 
 /* Import any supported geometry file, picking the reader by extension.
- * `scale` multiplies every vertex; 1.0 means the file is already in metres.
+ * `scale` becomes the placed Prim's uniform scale -- it is NOT baked into the
+ * vertices, so it stays adjustable afterwards. 1.0 means the file is metres.
  *
  * `at` places the result: the footprint is centred on (at.x, at.y) and the
  * BOTTOM of the geometry is set to at.z, so `at = (0,0,0)` stands the part on

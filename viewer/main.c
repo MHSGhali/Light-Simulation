@@ -590,6 +590,14 @@ static double drop_clearance(const App *a) {
     } else if (a->sel_prim >= 0 && a->sel_prim < a->d.nprims) {
         const Prim *p = &a->d.prims[a->sel_prim];
         if (p->kind == LS_PRIM_SPHERE) return p->r;
+        if (p->kind == LS_PRIM_MESH && p->mesh_id >= 0 &&
+            p->mesh_id < a->d.nmeshes && a->d.meshes[p->mesh_id]) {
+            /* Stand it on the surface: the drag sets the CENTRE, so the offset
+             * is however far the geometry reaches below it. */
+            vec3 lo, hi;
+            ls_mesh_world_bounds(a->d.meshes[p->mesh_id], p, &lo, &hi);
+            return p->c.z - lo.z;
+        }
     }
     return 0.02;
 }
@@ -696,11 +704,12 @@ static void draw_overlay(SDL_Renderer *ren, const App *a, const Camera *cam) {
              * intersector uses. It also makes the transform visible: a rotated
              * mesh has a visibly rotated box. */
             const Mesh *m = a->d.meshes[p->mesh_id];
-            vec3 lo = m->lo, hi = m->hi, corner[8];
+            ls_real sc = (p->r > 0.0) ? p->r : 1.0;
+            vec3 corner[8];
             for (int k = 0; k < 8; ++k) {
-                vec3 o = v3((k & 1) ? hi.x : lo.x,
-                            (k & 2) ? hi.y : lo.y,
-                            (k & 4) ? hi.z : lo.z);
+                vec3 o = v3scale(v3((k & 1) ? m->hi.x : m->lo.x,
+                                    (k & 2) ? m->hi.y : m->lo.y,
+                                    (k & 4) ? m->hi.z : m->lo.z), sc);
                 corner[k] = v3add(p->c, v3add(v3scale(p->ex, o.x),
                                    v3add(v3scale(p->ey, o.y), v3scale(p->n, o.z))));
             }

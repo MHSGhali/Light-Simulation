@@ -194,8 +194,7 @@ static bool read_obj(const char *path, const char *want, Build *b,
     return ok;
 }
 
-Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
-                  char err[256]) {
+Mesh *ls_obj_load(const char *path, const char *group, char err[256]) {
     Build b;
     memset(&b, 0, sizeof b);
     char mtllib[256] = "";
@@ -209,8 +208,6 @@ Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
         free(b.v); free(b.idx);
         return NULL;
     }
-    if (scale != 1.0)
-        for (int i = 0; i < b.nv; ++i) b.v[i] = v3scale(b.v[i], scale);
     Mesh *m = ls_mesh_build(b.v, b.nv, b.idx, b.ntri);
     free(b.v); free(b.idx);
     if (!m) { snprintf(err, 256, "'%s' built no usable geometry", path); return NULL; }
@@ -224,7 +221,6 @@ Mesh *ls_obj_load(const char *path, const char *group, ls_real scale,
     if (realpath(path, abs)) snprintf(m->src_path, sizeof m->src_path, "%s", abs);
     else                     snprintf(m->src_path, sizeof m->src_path, "%s", path);
     snprintf(m->group, sizeof m->group, "%s", group ? group : "");
-    m->scale = scale;
     return m;
 }
 
@@ -281,18 +277,19 @@ static int mtl_material(SceneDesc *d, const char *name, ls_real kd[3],
 /* Where a freshly imported mesh should sit, given where its geometry actually
  * is. Returns the Prim translation that puts the footprint centre at (at.x,
  * at.y) and the lowest point at at.z. */
-static vec3 placement(const Mesh *m, const vec3 *at) {
+static vec3 placement(const Mesh *m, ls_real scale, const vec3 *at) {
     if (!at) return v3(0, 0, 0);
-    return v3(at->x - 0.5 * (m->lo.x + m->hi.x),
-              at->y - 0.5 * (m->lo.y + m->hi.y),
-              at->z - m->lo.z);
+    return v3(at->x - 0.5 * (m->lo.x + m->hi.x) * scale,
+              at->y - 0.5 * (m->lo.y + m->hi.y) * scale,
+              at->z - m->lo.z * scale);
 }
 
 /* Both the size AND the position, because either one alone hides a whole class
  * of mistake: the size catches a units error, the position catches a part that
  * is faithfully traced somewhere the camera will never look. */
-static void report(const char *name, const Mesh *m, vec3 off) {
-    vec3 lo = v3add(m->lo, off), hi = v3add(m->hi, off);
+static void report(const char *name, const Mesh *m, ls_real scale, vec3 off) {
+    vec3 lo = v3add(v3scale(m->lo, scale), off);
+    vec3 hi = v3add(v3scale(m->hi, scale), off);
     printf("        %s: %.4g x %.4g x %.4g m  at (%.3g %.3g %.3g)..(%.3g %.3g %.3g)\n",
            name, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z,
            lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
@@ -402,10 +399,10 @@ int ls_scene_import_obj_at(SceneDesc *d, const char *path, ls_real scale,
         int mat = mtl_material(d, gname ? gname : "imported", kd, emissive, d->err);
         if (mat < 0) return -1;
 
-        Mesh *m = ls_obj_load(path, gname, scale, d->err);
+        Mesh *m = ls_obj_load(path, gname, d->err);
         if (!m) return -1;
-        vec3 off = placement(m, at);
-        report(gname ? gname : "imported", m, off);
+        vec3 off = placement(m, scale, at);
+        report(gname ? gname : "imported", m, scale, off);
         int pi = ls_scene_add_mesh_prim(d, m, mat);
         if (pi < 0) {
             ls_mesh_release(m);
@@ -413,6 +410,7 @@ int ls_scene_import_obj_at(SceneDesc *d, const char *path, ls_real scale,
             return -1;
         }
         d->prims[pi].c = off;
+        d->prims[pi].r = scale;
         ls_scene_rebuild(d);
         added++;
     }
@@ -498,7 +496,7 @@ static bool stl_ascii(char *buf, size_t len, Build *b, char err[256]) {
     return true;
 }
 
-Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]) {
+Mesh *ls_stl_load(const char *path, char err[256]) {
     Slurp s;
     if (!slurp(path, &s, err)) return NULL;
 
@@ -518,9 +516,6 @@ Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]) {
     /* STL repeats every vertex per triangle, so a 100k-facet file arrives as
      * 300k positions. ls_mesh_build copies them as given; the BVH is over
      * triangles and does not care, so this costs memory and nothing else. */
-    if (scale != 1.0)
-        for (int i = 0; i < b.nv; ++i) b.v[i] = v3scale(b.v[i], scale);
-
     Mesh *m = ls_mesh_build(b.v, b.nv, b.idx, b.ntri);
     free(b.v); free(b.idx);
     if (!m) { snprintf(err, 256, "'%s' built no usable geometry", path); return NULL; }
@@ -528,7 +523,6 @@ Mesh *ls_stl_load(const char *path, ls_real scale, char err[256]) {
     if (realpath(path, abs)) snprintf(m->src_path, sizeof m->src_path, "%s", abs);
     else                     snprintf(m->src_path, sizeof m->src_path, "%s", path);
     m->group[0] = '\0';
-    m->scale = scale;
     return m;
 }
 
@@ -571,7 +565,7 @@ int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
     /* An STL carries no material of any kind, so it gets a neutral one to be
      * replaced by hand. Named after the file so several imports do not collide
      * on a single "imported". */
-    Mesh *m = ls_stl_load(path, scale, d->err);
+    Mesh *m = ls_stl_load(path, d->err);
     if (!m) return -1;
 
     const char *slash = strrchr(path, '/');
@@ -585,8 +579,8 @@ int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
     int mat = mtl_material(d, name[0] ? name : "imported", grey, false, d->err);
     if (mat < 0) { ls_mesh_release(m); return -1; }
 
-    vec3 off = placement(m, at);
-    report(name, m, off);
+    vec3 off = placement(m, scale, at);
+    report(name, m, scale, off);
     int pi = ls_scene_add_mesh_prim(d, m, mat);
     if (pi < 0) {
         ls_mesh_release(m);
@@ -594,6 +588,7 @@ int ls_scene_import_at(SceneDesc *d, const char *path, ls_real scale,
         return -1;
     }
     d->prims[pi].c = off;
+    d->prims[pi].r = scale;
     ls_scene_rebuild(d);
     return 1;
 }

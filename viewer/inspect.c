@@ -183,8 +183,20 @@ int ls_inspect_fields(const SceneDesc *d, int sel_light, int sel_prim,
              * the file, and the editable placement is the X/Y/Z above plus the
              * gizmo. Showing the count is what tells you the import worked. */
             const Mesh *msh = d->meshes[p->mesh_id];   /* `m` is the Material */
+            /* Uniform only. A non-uniform scale would stop the object-to-world
+             * basis being orthonormal, and the intersector inverts it by
+             * transpose and carries normals through it unchanged -- both of
+             * which a shear would silently break. */
+            ls_real sc = (p->r > 0.0) ? p->r : 1.0;
+            push(out, max, &n, val(FLD_P_SCALE, "SCALE", "", sc, 1e-4, 1e4));
+            /* The size it actually occupies, which is what the user is aiming
+             * at when they drag the scale. */
+            vec3 d3 = v3scale(v3sub(msh->hi, msh->lo), sc);
+            push(out, max, &n, ro(FLD_P_SIZEU, "SIZE X", "M", d3.x));
+            push(out, max, &n, ro(FLD_P_SIZEV, "SIZE Y", "M", d3.y));
             push(out, max, &n, ro(FLD_P_TRIS, "TRIANGLES", "", (double)msh->ntris));
-            if (adv) push(out, max, &n, ro(FLD_P_AREA, "SURFACE AREA", "M2", msh->area));
+            if (adv) push(out, max, &n, ro(FLD_P_AREA, "SURFACE AREA", "M2",
+                                           msh->area * sc * sc));
         }
 
         push(out, max, &n, head("MATERIAL"));
@@ -351,6 +363,26 @@ bool ls_inspect_set(SceneDesc *d, int sel_light, int sel_prim,
             case FLD_P_Y: p->c.y = v; break;
             case FLD_P_Z: p->c.z = v; break;
             case FLD_P_RADIUS: p->r = v; break;
+            case FLD_P_SCALE:
+                /* Grow about the object's own footprint centre and its base,
+                 * so resizing does not send it through the floor or slide it
+                 * sideways -- the two things that make a scale handle feel
+                 * broken. */
+                if (p->kind == LS_PRIM_MESH && p->mesh_id >= 0 &&
+                    p->mesh_id < d->nmeshes && d->meshes[p->mesh_id]) {
+                    const Mesh *ms = d->meshes[p->mesh_id];
+                    ls_real was = (p->r > 0.0) ? p->r : 1.0;
+                    vec3 lo0, hi0, lo1, hi1;
+                    ls_mesh_world_bounds(ms, p, &lo0, &hi0);
+                    p->r = v;
+                    ls_mesh_world_bounds(ms, p, &lo1, &hi1);
+                    p->c = v3add(p->c,
+                                 v3(0.5 * ((lo0.x + hi0.x) - (lo1.x + hi1.x)),
+                                    0.5 * ((lo0.y + hi0.y) - (lo1.y + hi1.y)),
+                                    lo0.z - lo1.z));
+                    (void)was;
+                } else p->r = v;
+                break;
             case FLD_P_SIZEU: p->ex = v3scale(v3norm(p->ex), v * 0.5); break;
             case FLD_P_SIZEV: p->ey = v3scale(v3norm(p->ey), v * 0.5); break;
             case FLD_M_KIND: {

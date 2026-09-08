@@ -78,7 +78,9 @@ into a scene:
 ```
 
 In the viewer: **drag the file onto the window**, or press `I`. Imports go
-through the same undo as any other edit.
+through the same undo as any other edit, and the inspector's `SCALE` row
+resizes an imported mesh afterwards — it grows about its own footprint centre
+and base, so it neither slides sideways nor sinks through the floor.
 
 | | OBJ | STL |
 |---|---|---|
