@@ -61,7 +61,14 @@ you author in, at every tier.
 | `3` illuminance shading | | `D` duplicate | | `Q` draft ↔ fine |
 | `F` drape field on geometry | | `Del` delete | | `V` tier |
 | `Tab` cycle selection | | `⌘Z` `⌘Y` undo / redo | | `R` re-solve |
-| `Esc` cancel → deselect → quit | | `S` `W` `B` save PPM / scene / Blender | | |
+| `Esc` cancel → deselect → quit | | `S` `W` `B` save PPM / scene / Blender | | `H` every key, on screen |
+
+Every command has a button as well, and every button shows its key on the
+right, so the two can never disagree. Hovering a button explains what it does
+and what it needs selected; `H` lists the lot, including the gestures that have
+no button. What the viewer has to say — what was written, what was selected, an
+import that was rescaled or refused — is said **on the canvas**, not only in
+the terminal you may have launched it from.
 
 `3` shades **every surface** by the illuminance arriving at it, not just the
 measurement plane, so walls, parts and luminaire bodies are all measured.
