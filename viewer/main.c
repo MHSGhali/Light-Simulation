@@ -139,21 +139,36 @@ typedef struct {
 
     const char *scene_path;
 
-    /* A transient message under the canvas. Everything else this viewer says
-     * ("wrote out/...", "selected light 3") goes to stdout, which a user who
-     * launched from the Finder never sees. An import that silently failed
-     * would be the worst instance of that. */
-    char   status[128];
-    Uint32 status_at;
+    /* Everything this viewer has to say, shown ON THE CANVAS. It used to go
+     * only to stdout, which a user who launched from the Finder never sees --
+     * an import that silently failed being the worst instance of that. */
+    StatusLog log;
+
+    bool help_open;              /* the key list is showing */
 } App;
 
+/* Something that has happened, which fades. A condition that is still TRUE
+ * goes through status_set_sticky instead and is drawn as a banner, because the
+ * two want different treatment: one scrolls away, the other must not. */
+static void say_v(App *a, StatusLevel level, const char *fmt, va_list ap) {
+    char text[STATUS_MAX_TEXT];
+    vsnprintf(text, sizeof text, fmt, ap);
+    status_push(&a->log, level, SDL_GetTicks(), text);
+    printf("%s\n", text);
+}
+
 static void say(App *a, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(a->status, sizeof a->status, fmt, ap);
-    va_end(ap);
-    a->status_at = SDL_GetTicks();
-    printf("%s\n", a->status);
+    va_list ap; va_start(ap, fmt); say_v(a, STATUS_INFO, fmt, ap); va_end(ap);
+}
+
+/* A default that was guessed, or a command that was refused: worth noticing,
+ * but nothing broke. */
+static void warn(App *a, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); say_v(a, STATUS_WARN, fmt, ap); va_end(ap);
+}
+
+static void fail(App *a, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); say_v(a, STATUS_ERROR, fmt, ap); va_end(ap);
 }
 
 /* ------------------------------------------------------------------ grid */
@@ -545,7 +560,7 @@ static void pick_at(App *a, const Camera *cam, int mx, int my) {
     if (best >= 0) {
         a->sel_light = best;
         a->sel_prim = -1;
-        printf("selected light %d\n", best);
+        say(a, "SELECTED LIGHT %d", best);
         return;
     }
 
@@ -554,9 +569,9 @@ static void pick_at(App *a, const Camera *cam, int mx, int my) {
         /* A hit on an area light's own geometry selects the LIGHT, not the
          * quad -- clicking a luminaire should give you the luminaire. */
         if (h.light_id >= 0) { a->sel_light = h.light_id; a->sel_prim = -1;
-                               printf("selected light %d\n", h.light_id); }
+                               say(a, "SELECTED LIGHT %d", h.light_id); }
         else                 { a->sel_light = -1; a->sel_prim = h.prim_id;
-                               printf("selected surface %d\n", h.prim_id); }
+                               say(a, "SELECTED SURFACE %d", h.prim_id); }
         return;
     }
     a->sel_light = -1;
@@ -1056,7 +1071,7 @@ static void insp_draw(SDL_Renderer *ren, const App *a) {
     draw_rect_line(ren, x, y, w, h, COL_RULE, 255);
 
     const char *title = a->sel_light >= 0 ? "LIGHT" : a->sel_prim >= 0 ? "PART" : "INSPECTOR";
-    draw_text(ren, x + 14, y + 9, 1, title, COL_ACCENT, 255);
+    draw_text(ren, x + 14, y + 9, 1, title, COL_HEAD, 255);
     const char *tier = a->tier == LS_TIER_SIMPLE ? "SIMPLE"
                      : a->tier == LS_TIER_ADVANCED ? "ADVANCED" : "SCIENTIFIC";
     draw_text_right(ren, x + w - 14, y + 9, 1, tier, COL_MUTED, 255);
@@ -1160,18 +1175,18 @@ static void adopt(App *a, SceneDesc *restored) {
 }
 
 static void app_undo(App *a) {
-    if (a->undo_n <= 0) { printf("nothing to undo\n"); return; }
+    if (a->undo_n <= 0) { warn(a, "NOTHING TO UNDO"); return; }
     scene_pause(a);
     push_snapshot(a->redo, &a->redo_n, &a->d);
     a->undo_n--;
     adopt(a, &a->undo[a->undo_n]);
     scene_resume(a);
     solve_and_refresh(a);
-    printf("undo\n");
+    say(a, "UNDO");
 }
 
 static void app_redo(App *a) {
-    if (a->redo_n <= 0) { printf("nothing to redo\n"); return; }
+    if (a->redo_n <= 0) { warn(a, "NOTHING TO REDO"); return; }
     scene_pause(a);
     /* Deliberately not push_undo: redoing must not clear the redo stack. */
     push_snapshot(a->undo, &a->undo_n, &a->d);
@@ -1179,7 +1194,7 @@ static void app_redo(App *a) {
     adopt(a, &a->redo[a->redo_n]);
     scene_resume(a);
     solve_and_refresh(a);
-    printf("redo\n");
+    say(a, "REDO");
 }
 
 /* A light of the currently selected kind, sized and aimed for the surface it
@@ -1235,7 +1250,7 @@ static void app_place(App *a, const Camera *cam, int mx, int my) {
     if (a->tool == UI_TOOL_LIGHT) {
         int id = ls_scene_add_light(&a->d, make_light(a, p, v3neg(ng)));
         a->sel_light = id; a->sel_prim = -1;
-        printf("placed light %d\n", id);
+        say(a, "PLACED LIGHT %d", id);
     } else {
         Material m;
         memset(&m, 0, sizeof m);
@@ -1253,7 +1268,7 @@ static void app_place(App *a, const Camera *cam, int mx, int my) {
         pr.light_id = -1;
         int id = ls_scene_add_prim(&a->d, pr);
         a->sel_prim = id; a->sel_light = -1;
-        printf("placed part %d\n", id);
+        say(a, "PLACED PART %d", id);
     }
     a->tool = UI_TOOL_NONE;
     scene_resume(a);
@@ -1268,6 +1283,7 @@ static void app_delete(App *a) {
     else                   { ls_scene_remove_prim(&a->d, a->sel_prim);   a->sel_prim = -1; }
     scene_resume(a);
     solve_and_refresh(a);
+    say(a, "DELETED");
 }
 
 static void app_duplicate(App *a) {
@@ -1278,6 +1294,8 @@ static void app_duplicate(App *a) {
     if (id >= 0) a->sel_light = id;
     scene_resume(a);
     solve_and_refresh(a);
+    if (id >= 0) say(a, "DUPLICATED AS LIGHT %d", id);
+    else         fail(a, "COULD NOT DUPLICATE THAT LIGHT");
 }
 
 static void save_outputs(App *a) {
@@ -1285,10 +1303,14 @@ static void save_outputs(App *a) {
         int up = a->nu < 64 ? (64 + a->nu - 1) / a->nu : 1;
         if (ls_write_falsecolor_ppm("out/view_field.ppm", a->disp, a->nu, a->nv,
                                     a->lo, a->hi, up))
-            printf("wrote out/view_field.ppm\n");
+            say(a, "WROTE OUT/VIEW_FIELD.PPM");
+        else
+            fail(a, "COULD NOT WRITE OUT/VIEW_FIELD.PPM");
     } else {
         if (ls_film_write_ppm(&a->film, "out/view_render.ppm", a->exposure))
-            printf("wrote out/view_render.ppm\n");
+            say(a, "WROTE OUT/VIEW_RENDER.PPM");
+        else
+            fail(a, "COULD NOT WRITE OUT/VIEW_RENDER.PPM");
     }
 }
 
@@ -1303,8 +1325,8 @@ static void save_scene(App *a) {
     const char *suffix = ".edited.scene";
     if (n > 6 && strcmp(path + n - 6, ".scene") == 0) path[n - 6] = '\0';
     strncat(path, suffix, sizeof path - strlen(path) - 1);
-    if (ls_scene_save(&a->d, path)) printf("wrote %s\n", path);
-    else fprintf(stderr, "could not write %s\n", path);
+    if (ls_scene_save(&a->d, path)) say(a, "WROTE %s", path);
+    else                            fail(a, "COULD NOT WRITE %s", path);
 }
 
 /* Bring in an OBJ, or open a whole .scene. Goes through the same
@@ -1368,7 +1390,7 @@ static void app_import(App *a, const char *path) {
     size_t n = strlen(path);
     if (n > 6 && strcmp(path + n - 6, ".scene") == 0) {
         SceneDesc nd;
-        if (!ls_scene_load(&nd, path)) { say(a, "%s", nd.err); return; }
+        if (!ls_scene_load(&nd, path)) { fail(a, "%s", nd.err); return; }
         scene_pause(a);
         push_undo(a);
         ls_scene_desc_free(&a->d);
@@ -1393,7 +1415,7 @@ static void app_import(App *a, const char *path) {
     scene_resume(a);
     if (added < 0) {
         app_undo(a);                  /* nothing landed; drop the snapshot */
-        say(a, "%s", a->d.err);
+        fail(a, "%s", a->d.err);
         return;
     }
 
@@ -1407,7 +1429,7 @@ static void app_import(App *a, const char *path) {
         scene_resume(a);
         if (again < 0) {              /* it read once, so this should not fail */
             app_undo(a);
-            say(a, "%s", a->d.err);
+            fail(a, "%s", a->d.err);
             return;
         }
         added = again;
@@ -1419,8 +1441,8 @@ static void app_import(App *a, const char *path) {
         if (a->d.prims[i].kind == LS_PRIM_MESH) { a->sel_prim = i; a->sel_light = -1; }
     solve_and_refresh(a);
     if (rescaled)
-        say(a, "%s  %d MESH%s  SCALED MM TO M  ^Z UNDOES", base, added,
-            added == 1 ? "" : "ES");
+        warn(a, "%s  %d MESH%s  SCALED MM TO M  ^Z UNDOES", base, added,
+             added == 1 ? "" : "ES");
     else
         say(a, "%s  %d MESH%s  %.3G M ACROSS", base, added,
             added == 1 ? "" : "ES", mesh_extent(a));
@@ -1439,7 +1461,7 @@ static void app_import_dialog(App *a) {
     FILE *p = popen("osascript -e 'POSIX path of (choose file with prompt "
                     "\"Import geometry (.obj, .stl, .scene)\")' "
                     "2>/dev/null", "r");
-    if (!p) { say(a, "COULD NOT OPEN A FILE CHOOSER -- DRAG A FILE IN"); return; }
+    if (!p) { fail(a, "COULD NOT OPEN A FILE CHOOSER -- DRAG A FILE IN"); return; }
     char path[1024];
     if (fgets(path, sizeof path, p)) {
         size_t n = strlen(path);
@@ -1462,7 +1484,9 @@ static void export_blender(App *a) {
     if (ls_export_blender(&a->d, a->disp, a->nu, a->nv, a->lo, a->hi, unit,
                           a->st.photometric ? "illuminance" : "irradiance",
                           "out/view_scene.py"))
-        printf("wrote out/view_scene.py  (Blender: Scripting > Open > Run)\n");
+        say(a, "WROTE OUT/VIEW_SCENE.PY  BLENDER: SCRIPTING > OPEN > RUN");
+    else
+        fail(a, "COULD NOT WRITE OUT/VIEW_SCENE.PY");
 }
 
 int main(int argc, char **argv) {
@@ -1480,6 +1504,7 @@ int main(int argc, char **argv) {
             printf("          V tier: simple / advanced / scientific\n");
             printf("          F drape the measured field on the geometry\n");
             printf("  FILE    R re-solve   S save PPM   W save scene   B export Blender\n");
+            printf("  HELP    H every key, on screen\n");
             printf("  ESC     cancel, then deselect, then quit\n\n");
             printf("  Click to select. Drag the selection to move it, or use the axis\n");
             printf("  handles and rotation rings on the gizmo. Drag elsewhere to orbit\n");
@@ -1577,7 +1602,8 @@ int main(int argc, char **argv) {
     SDL_RenderSetLogicalSize(ren, WIN_W, WIN_H);
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);   /* drag an .obj onto the window */
 
-    ui_init(&a.t);
+    status_init(&a.log);
+    ui_init(&a.t, WIN_H);
     SDL_StartTextInput();
 
     /* Canvas geometry. */
@@ -1630,7 +1656,8 @@ int main(int argc, char **argv) {
                         /* A cancel ladder, most transient state first, so one
                          * key backs out of whatever is in progress before it
                          * closes the window. */
-                        if (a.typing)                { a.typing = false; a.entry_len = 0; }
+                        if (a.help_open)             a.help_open = false;
+                        else if (a.typing)           { a.typing = false; a.entry_len = 0; }
                         else if (a.tool != UI_TOOL_NONE) a.tool = UI_TOOL_NONE;
                         else if (a.focus >= 0)       a.focus = -1;
                         else if (a.sel_light >= 0 || a.sel_prim >= 0)
@@ -1652,6 +1679,7 @@ int main(int argc, char **argv) {
                                  atomic_store(&a.restart, 1); break;
                     case SDLK_v: a.tier = (LsTier)((a.tier + 1) % 3); break;
                     case SDLK_f: a.show_drape = !a.show_drape; break;
+                    case SDLK_h: a.help_open = !a.help_open; break;
                     case SDLK_TAB: {
                         /* Step through the lights, then the parts, then back to
                          * nothing -- so everything is reachable without hunting
@@ -1725,6 +1753,9 @@ int main(int argc, char **argv) {
             }
             else if (e.type == SDL_MOUSEMOTION) {
                 a.t.hover = ui_hit_test(&a.t, e.motion.x, e.motion.y);
+                /* A held button un-presses when the cursor leaves it, so
+                 * releasing away from it does not look like it fired. */
+                if (a.t.pressed >= 0 && a.t.hover != a.t.pressed) a.t.pressed = -1;
                 if (a.gz_active != GZ_NONE) {
                     Camera gcam = active_camera(&a, rw, rh);
                     gizmo_drag(&a, &gcam, e.motion.x, e.motion.y);
@@ -1794,7 +1825,13 @@ int main(int argc, char **argv) {
             else if (e.type == SDL_MOUSEBUTTONDOWN) {
                 int hit = ui_hit_test(&a.t, e.button.x, e.button.y);
                 if (hit >= 0) {
-                    if (a.t.buttons[hit].enabled) switch (a.t.buttons[hit].action) {
+                    a.t.pressed = hit;
+                    /* A refused button says why, in the same words its tooltip
+                     * uses -- a click that does nothing is indistinguishable
+                     * from a click that missed. */
+                    if (!a.t.buttons[hit].enabled)
+                        warn(&a, "%s", a.t.buttons[hit].tip);
+                    else switch (a.t.buttons[hit].action) {
                         case UI_VIEW_3D:     a.view = 0; atomic_store(&a.restart, 1); break;
                         case UI_VIEW_TOP:    a.view = 1; atomic_store(&a.restart, 1); break;
                         case UI_VIEW_HEAT:   a.shade_heat = !a.shade_heat;
@@ -1821,6 +1858,7 @@ int main(int argc, char **argv) {
                         case UI_SAVE_SCENE:  save_scene(&a); break;
                         case UI_BLENDER:     export_blender(&a); break;
                         case UI_IMPORT:      app_import_dialog(&a); break;
+                        case UI_HELP:        a.help_open = !a.help_open; break;
                         default: break;
                     }
                 } else {
@@ -1881,6 +1919,7 @@ int main(int argc, char **argv) {
                 }
             }
             else if (e.type == SDL_MOUSEBUTTONUP) {
+                a.t.pressed = -1;
                 if (a.gz_active != GZ_NONE) {
                     a.gz_active = GZ_NONE;
                     solve_and_refresh(&a);
@@ -1923,6 +1962,15 @@ int main(int argc, char **argv) {
         a.st.has_selection = (a.sel_light >= 0 || a.sel_prim >= 0);
         a.st.can_undo = (a.undo_n > 0);
         a.st.can_redo = (a.redo_n > 0);
+        a.st.help_open = a.help_open;
+        /* An armed tool is a condition that is still true, not something that
+         * has happened, so it belongs in the banner rather than the message
+         * stack -- it must not fade out from under the user mid-gesture. */
+        if (a.tool != UI_TOOL_NONE) {
+            snprintf(buf, sizeof buf, "CLICK A SURFACE TO PLACE A %s   ESC CANCELS",
+                     a.tool == UI_TOOL_LIGHT ? "LIGHT" : "PART");
+            status_set_sticky(&a.log, STATUS_INFO, buf);
+        } else status_clear_sticky(&a.log);
         insp_rebuild(&a);
         ui_apply_state(&a.t, a.st);
 
@@ -1980,20 +2028,18 @@ int main(int argc, char **argv) {
                 draw_colorbar(ren, a.view_x, a.view_y + side_c + 10, side_c, CBAR_H,
                               a.heat_lo, a.heat_hi, unit);
 
+            /* The banner and the message stack go over the picture, where the
+             * eye already is. The pass counter is a readout rather than a
+             * message, so it keeps its own line underneath. */
+            UiRect canvas = { a.view_x, a.view_y, side_c, side_c };
+            draw_status(ren, &a.log, canvas, SDL_GetTicks());
+
             int hint_y = a.view_y + side_c + (a.shade_heat ? CBAR_H + 26 : 12);
-            if (a.status[0] && SDL_GetTicks() - a.status_at < 6000) {
-                draw_text(ren, a.view_x, hint_y, 1, a.status, COL_ACCENT, 255);
-            } else if (a.tool != UI_TOOL_NONE) {
-                snprintf(buf, sizeof buf, "CLICK TO PLACE %s   ESC CANCELS",
-                         a.tool == UI_TOOL_LIGHT ? "LIGHT" : "PART");
-                draw_text(ren, a.view_x, hint_y, 1, buf, COL_ACCENT, 255);
-            } else {
-                snprintf(buf, sizeof buf, "%d PASSES   %s   %s",
-                         atomic_load(&a.passes),
-                         a.shade_heat ? "ILLUMINANCE ON EVERY SURFACE" : "RADIANCE",
-                         a.view == 1 ? "ORTHOGRAPHIC PLAN" : "DRAG ORBIT");
-                draw_text(ren, a.view_x, hint_y, 1, buf, COL_MUTED, 255);
-            }
+            snprintf(buf, sizeof buf, "%d PASSES   %s   %s",
+                     atomic_load(&a.passes),
+                     a.shade_heat ? "ILLUMINANCE ON EVERY SURFACE" : "RADIANCE",
+                     a.view == 1 ? "ORTHOGRAPHIC PLAN" : "DRAG ORBIT");
+            draw_text(ren, a.view_x, hint_y, 1, buf, COL_MUTED, 255);
         }
 
         /* ---- statistics ---- */
@@ -2001,7 +2047,7 @@ int main(int argc, char **argv) {
         draw_rect_fill(ren, sx, sy, STATS_W, 250, COL_PANEL, 255);
         draw_rect_line(ren, sx, sy, STATS_W, 250, COL_RULE, 255);
         draw_text(ren, sx + 14, sy + 14, 1,
-                  a.st.photometric ? "ILLUMINANCE E V" : "IRRADIANCE E E", COL_ACCENT, 255);
+                  a.st.photometric ? "ILLUMINANCE E V" : "IRRADIANCE E E", COL_HEAD, 255);
         draw_text(ren, sx + 14, sy + 30, 1,
                   a.st.direct_only ? "DIRECT ONLY" : "FULL TRANSPORT", COL_MUTED, 255);
         struct { const char *k; double v; int dec; } rows[] = {
@@ -2027,7 +2073,7 @@ int main(int argc, char **argv) {
         if (!a.shade_heat) py = -1000;
         draw_rect_fill(ren, sx, py, STATS_W, 92, COL_PANEL, 255);
         draw_rect_line(ren, sx, py, STATS_W, 92, COL_RULE, 255);
-        draw_text(ren, sx + 14, py + 14, 1, "PROBE", COL_ACCENT, 255);
+        draw_text(ren, sx + 14, py + 14, 1, "PROBE", COL_HEAD, 255);
         if (a.shade_heat && a.have_hover) {
             size_t k = (size_t)a.hover_j * (size_t)rw + (size_t)a.hover_i;
             if (a.hover_i >= 0 && a.hover_i < rw && a.hover_j >= 0 && a.hover_j < rh &&
@@ -2074,6 +2120,16 @@ int main(int argc, char **argv) {
             draw_rect_line(ren, cx, plot_y, WIN_W - cx - 12, PLOT_H, COL_RULE, 255);
             draw_text(ren, cx + 14, plot_y + 14, 1,
                       "CROSS SECTION AVAILABLE IN FIELD MAP MODE", COL_MUTED, 255);
+        }
+
+        /* Both of these sit over everything else, so they go last. A tooltip
+         * under the help overlay would only be read as a stray panel. */
+        if (!a.help_open && a.t.hover >= 0 && a.t.hover < a.t.count)
+            draw_tooltip(ren, a.t.buttons[a.t.hover].rect,
+                         a.t.buttons[a.t.hover].tip, WIN_W, WIN_H);
+        if (a.help_open) {
+            UiRect full = { UI_TOOLBAR_W, 0, WIN_W - UI_TOOLBAR_W, WIN_H };
+            draw_help(ren, &a.t, a.st, full);
         }
 
         SDL_RenderPresent(ren);

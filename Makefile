@@ -98,9 +98,10 @@ else
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(VIEWOBJ) $(SDL_LIBS) $(LDLIBS)
 endif
 
-# ui.c and font.c carry no SDL dependency, so the headless suite can exercise
-# the toolbar rules and glyph coverage without a window.
-HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o $(BUILD)/viewer_inspect.o
+# ui.c, font.c and status.c carry no SDL dependency, so the headless suite can
+# exercise the toolbar rules, the glyphs and the message log without a window.
+HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o $(BUILD)/viewer_inspect.o \
+                 $(BUILD)/viewer_status.o
 
 $(BUILD)/run_tests: $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW) $(LDLIBS)
