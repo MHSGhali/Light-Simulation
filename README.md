@@ -17,7 +17,7 @@ make                                  # library, CLI and viewer
 - **Spectral end to end.** Set 850 lm and change the colour temperature and the
   lumens stay put while the **watts** move — 4.6 W at 5000 K, 7.5 W at 2700 K.
 - **Validated against closed forms**, not against how it looks. `make test` runs
-  97 401 assertions, clean under ASan and UBSan.
+  99 187 assertions, clean under ASan and UBSan.
 
 <br clear="right">
 
@@ -48,31 +48,68 @@ scene, not the noise.
 
 ![the viewer](docs/viewer.png)
 
-Click to select, drag the selection to move it along the surface under it, drag
-elsewhere to orbit. The inspector on the right edits the selection: drag a row
-to scrub, or type a number. Three tiers change what is *shown*, never what is
-stored; the `LUX`/`WATT/M2` toggle changes which of the two equivalent numbers
-you author in, at every tier.
+Click to select, then drag the selection to slide it along the surface behind
+it, or drag a gizmo handle to move along one axis and a ring to turn about it.
+Drag empty canvas to orbit. The inspector on the right edits the selection:
+drag a row to scrub, or type a number. Three tiers change what is *shown*,
+never what is stored; the `LUX`/`WATT/M2` toggle changes which of the two
+equivalent numbers you author in, at every tier.
 
 | key | | key | | key |
 |---|---|---|---|---|
 | `1` 3D perspective | | `A` add light | | `U` lux ↔ W/m² |
 | `2` orthographic plan | | `P` add part | | `T` full ↔ direct |
-| `3` illuminance shading | | `D` duplicate | | `Q` draft ↔ fine |
-| `F` drape field on geometry | | `Del` delete | | `V` tier |
+| `3` illuminance shading | | `I` import OBJ / STL | | `Q` draft ↔ fine |
+| `F` drape field on geometry | | `D` duplicate   `Del` delete | | `V` tier |
 | `Tab` cycle selection | | `⌘Z` `⌘Y` undo / redo | | `R` re-solve |
 | `Esc` cancel → deselect → quit | | `S` `W` `B` save PPM / scene / Blender | | `H` every key, on screen |
 
 Every command has a button as well, and every button shows its key on the
 right, so the two can never disagree. Hovering a button explains what it does
-and what it needs selected; `H` lists the lot, including the gestures that have
-no button. What the viewer has to say — what was written, what was selected, an
-import that was rescaled or refused — is said **on the canvas**, not only in
-the terminal you may have launched it from.
+and what it needs selected — and clicking one that is refused says **why**, in
+those same words, because a click that does nothing is otherwise
+indistinguishable from a click that missed:
+
+![a refused button says why it is refused](docs/viewer-buttons.png)
+
+What the viewer has to say — what was written, what was selected, an import
+that was rescaled or refused — is said on the canvas, not only in the terminal
+you may have launched it from. `H` lists every command, and the toolbar half of
+that list is generated from the buttons themselves, so a command cannot be
+added without appearing there:
+
+![every command, on screen](docs/viewer-help.png)
+
+### One scene, several ways of looking at it
+
+![the viewer's views](docs/viewer-tour.gif)
+
+`1` and `2` are the two cameras — perspective, and an orthographic plan framed
+on the measurement grid so geometry and result line up. `3` is not a third
+camera: it recolours whichever view is showing. `F` drapes the measured field
+over the geometry instead, for when you want the picture and the numbers at
+once.
 
 `3` shades **every surface** by the illuminance arriving at it, not just the
 measurement plane, so walls, parts and luminaire bodies are all measured.
-Hovering reads the value under the cursor.
+Hovering reads the value under the cursor:
+
+![illuminance on every surface, probed under the cursor](docs/viewer-illuminance.png)
+
+### Editing re-measures
+
+Every edit re-solves the grid when the gesture ends, so the statistics panel is
+never left describing a scene you have already changed. Here one luminaire's
+`COLOUR TEMP` is scrubbed from 5000 K down to 2689 K and back up to 6500 K:
+
+![scrubbing a luminaire's colour temperature](docs/viewer-inspector.gif)
+
+`FLUX` holds at 200.0 lm throughout — it is what was authored — so the measured
+illuminance does not move either. What moves is `RADIANT FLUX`, 1.085 W at
+5000 K against 1.786 W at 2689 K, and the efficacy that follows from it, 184.3
+against 112.0 lm/W. The spectrum swaps from `DAYLIGHT` to `BLACKBODY` on the
+way past 4000 K — a Planckian radiator below, a CIE daylight illuminant above,
+which is as low as that locus is defined anyway.
 
 ## Importing geometry
 
@@ -87,7 +124,12 @@ into a scene:
 In the viewer: **drag the file onto the window**, or press `I`. Imports go
 through the same undo as any other edit, and the inspector's `SCALE` row
 resizes an imported mesh afterwards — it grows about its own footprint centre
-and base, so it neither slides sideways nor sinks through the floor.
+and base, so it neither slides sideways nor sinks through the floor:
+
+![dropping an OBJ on the window, then resizing it](docs/viewer-import.gif)
+
+The importer says what it read on the canvas as it lands — here `2 MESHES,
+0.18 M ACROSS` — which is the first chance to notice a units error.
 
 | | OBJ | STL |
 |---|---|---|
@@ -180,8 +222,14 @@ The furnace test matters most: it fails loudly on energy-conservation bugs,
 missing cosine factors, wrong PDFs and bad Russian roulette — the errors that
 are invisible in a picture that looks fine.
 
-Every image in this README is a real run. `docs/` is generated by re-running the
-simulator, and the false colour uses the same viridis table `viewer/draw.c` does.
+Every image in this README is a real run, and `docs/` is regenerated by
+`python3 tools/make_docs.py`. The renders and field maps come from the CLI, and
+their false colour uses the same viridis table `viewer/draw.c` does. The viewer
+shots come from the viewer: `tools/shots/*.cap` drive the real `lightsim-view`
+binary through SDL's dummy video driver — no window, no display, no hand
+capture — so a scripted click goes through the same hit test yours does, and a
+change to the chrome shows up here the next time the script is run rather than
+the next time somebody notices.
 
 ## Licence
 

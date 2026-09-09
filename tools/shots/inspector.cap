@@ -1,0 +1,19 @@
+# The claim the whole spectral pipeline exists to make, scrubbed live: drag a
+# luminaire's COLOUR TEMP and the lumens do not move, because they are what
+# was authored -- the WATTS move instead, and so does efficacy, and so does
+# the colour of the render.
+wait 5000
+key Tab                     # the first luminaire
+key V
+key V                       # SIMPLE -> ADVANCED -> SCIENTIFIC
+wait 1500
+
+record inspector 160
+wait 800
+# The scrub is multiplicative (1.012 per pixel), so these two are 5000 K down
+# to about 2700 and back up past 6000 -- the range the README quotes.
+drag 1200 388 1148 388 1800 # COLOUR TEMP row, dragged warm
+wait 2800
+drag 1148 388 1222 388 1800 # and back up, past where it started
+wait 3200
+stop

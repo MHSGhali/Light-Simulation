@@ -1,0 +1,12 @@
+# Drop a file on the window, then resize what landed. The importer says what
+# it read on the canvas, and SCALE grows the mesh about its own footprint
+# centre and base, so it neither slides sideways nor sinks through the floor.
+wait 5000
+key V                       # ADVANCED, so SCALE and the sizes are all on show
+record import 200
+wait 800
+drop scenes/models/bracket.obj
+wait 4500
+drag 1200 371 1320 371 1800 # SCALE row
+wait 3400
+stop

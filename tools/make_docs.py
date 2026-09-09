@@ -8,12 +8,14 @@ render`, the field maps are coloured from the CSV `lightsim grid` writes, and
 the ramp is the viridis table viewer/draw.c uses, so the README and the tool
 agree. Nothing here is drawn by hand or touched up.
 
-The one screenshot, docs/viewer.png, is not generated -- it is a capture of the
-running viewer.
+The viewer shots are real runs too. tools/shots/*.cap drive the actual
+lightsim-view binary through SDL's dummy video driver -- no window, no display,
+no hand capture -- so a change to the toolbar shows up in the README the next
+time this is run rather than the next time somebody notices.
 
 Needs Pillow.
 """
-import csv, json, math, os, subprocess
+import csv, glob, json, math, os, shutil, subprocess
 from PIL import Image, ImageDraw, ImageFont
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,8 +43,8 @@ def viridis(t):
                  for k in range(3))
 
 
-def run(args):
-    subprocess.run(args, cwd=REPO, check=True,
+def run(args, env=None):
+    subprocess.run(args, cwd=REPO, check=True, env=env,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -191,9 +193,88 @@ def direct_vs_full():
           f"to the mean; {ds['occluded']} points get no direct light at all")
 
 
+# ---------------------------------------------------------------- viewer ---
+WINDOW = (0, 0, 1360, 860)
+# The canvas plus the panels beside it, for a sequence that is about one
+# gesture rather than about the whole window.
+CANVAS_AND_PANELS = (180, 8, 1356, 648)
+# The two right-hand panels alone. Kept at full size, because the whole point
+# of the scrub is which numbers move and which do not, and this font stops
+# being readable the moment it is scaled down.
+PANELS = (1076, 40, 1352, 640)
+
+
+def viewer_run(script, out_dir):
+    """Drive lightsim-view through `script`, returning the frames it wrote.
+
+    SDL_VIDEODRIVER=dummy means no window opens and no display is needed, so
+    this runs the same on a laptop and in CI. The binary is the real one: a
+    scripted click goes through the same hit test a human's does."""
+    shutil.rmtree(out_dir, ignore_errors=True)
+    os.makedirs(out_dir, exist_ok=True)
+    env = dict(os.environ, SDL_VIDEODRIVER="dummy")
+    run(["./lightsim-view", SCENE, "--capture", script,
+         "--capture-out", out_dir], env=env)
+    return sorted(glob.glob(os.path.join(out_dir, "*.ppm")))
+
+
+def viewer_gif(frames, name, crop, scale, duration, stride=1):
+    imgs = []
+    for f in frames[::stride]:
+        im = Image.open(f).convert("RGB").crop(crop)
+        if scale != 1:
+            im = im.resize((im.width // scale, im.height // scale), Image.LANCZOS)
+        imgs.append(im)
+    # One shared palette across the whole sequence, and no dithering. Both are
+    # about the render's own noise: quantising each frame separately makes the
+    # flat panel greys crawl, and dithering turns per-pixel noise into a new
+    # pattern every frame, which is the one thing a GIF cannot compress.
+    pal = imgs[0].quantize(colors=64, method=Image.MEDIANCUT)
+    imgs = [im.quantize(palette=pal, dither=Image.NONE) for im in imgs]
+    imgs[0].save(f"{OUT}/{name}.gif", save_all=True, append_images=imgs[1:],
+                 duration=duration * stride, loop=0, optimize=True)
+    kb = os.path.getsize(f"{OUT}/{name}.gif") // 1024
+    print(f"   docs/{name}.gif  {len(imgs)} frames  {imgs[0].size}  {kb} KB")
+
+
+def viewer_stills():
+    print("viewer stills")
+    frames = viewer_run("tools/shots/stills.cap", f"{TMP}/stills")
+    want = {"viewer": "viewer", "help": "viewer-help",
+            "illuminance": "viewer-illuminance", "buttons": "viewer-buttons"}
+    for f in frames:
+        stem = os.path.splitext(os.path.basename(f))[0]
+        if stem not in want:
+            continue
+        Image.open(f).convert("RGB").crop(WINDOW).save(f"{OUT}/{want[stem]}.png")
+        print(f"   docs/{want[stem]}.png")
+
+
+def viewer_tour():
+    print("viewer tour")
+    frames = viewer_run("tools/shots/tour.cap", f"{TMP}/tour")
+    viewer_gif(frames, "viewer-tour", WINDOW, 2, 200)
+
+
+def viewer_inspector():
+    print("viewer inspector scrub")
+    frames = viewer_run("tools/shots/inspector.cap", f"{TMP}/inspector")
+    viewer_gif(frames, "viewer-inspector", PANELS, 1, 160)
+
+
+def viewer_import():
+    print("viewer import")
+    frames = viewer_run("tools/shots/import.cap", f"{TMP}/import")
+    viewer_gif(frames, "viewer-import", CANVAS_AND_PANELS, 2, 200, stride=2)
+
+
 if __name__ == "__main__":
     hero()
     orbit()
     mounting_height()
     direct_vs_full()
+    viewer_stills()
+    viewer_tour()
+    viewer_inspector()
+    viewer_import()
     print("wrote docs/")
