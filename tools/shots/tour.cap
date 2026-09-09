@@ -1,0 +1,25 @@
+# What the viewer can show, in one pass: orbit, plan, illuminance on every
+# surface, and the field draped over the geometry.
+#
+# The orbit is deliberately small. The enclosure is open only toward -y, so
+# swinging much past 30 degrees puts the camera outside it looking at the back
+# of a wall, and the tour spends its best frames on a black canvas.
+wait 6000
+record tour 200
+
+drag 470 330 512 318 1200   # drag empty canvas to orbit
+wait 500
+drag 512 318 452 334 1200   # and back the other way
+wait 700
+
+key 2                       # orthographic plan
+wait 2800
+key 3                       # illuminance on every surface
+wait 4000
+key 1                       # the same shading, back in perspective
+wait 4000
+
+key 3                       # shading off
+key F                       # drape the measured field on the geometry instead
+wait 3600
+stop

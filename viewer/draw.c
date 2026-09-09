@@ -370,11 +370,18 @@ void draw_colorbar(SDL_Renderer *ren, int x, int y, int w, int h,
         else if (v >= 1.0) snprintf(buf, sizeof buf, "%.1f", v);
         else snprintf(buf, sizeof buf, "%.2f", v);
         int tx = x + (w - 1) * k / 4;
+        /* The unit rides on the top tick rather than sitting above the bar:
+         * this bar is drawn hard under the canvas, so a label above it landed
+         * on the canvas border. It also matches how tools/make_docs.py labels
+         * the same ramp, so the README and the app read alike. */
+        if (k == 4) {
+            size_t used = strlen(buf);
+            snprintf(buf + used, sizeof buf - used, " %s", unit);
+        }
         if (k == 0)      draw_text(ren, tx, y + h + 5, 1, buf, COL_MUTED, 255);
         else if (k == 4) draw_text_right(ren, tx, y + h + 5, 1, buf, COL_MUTED, 255);
         else             draw_text_mid(ren, tx, y + h + 5, 1, buf, COL_MUTED, 255);
     }
-    draw_text_right(ren, x + w, y - 10, 1, unit, COL_MUTED, 255);
 }
 
 void draw_plot(SDL_Renderer *ren, int x, int y, int w, int h,

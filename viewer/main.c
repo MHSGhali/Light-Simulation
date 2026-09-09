@@ -30,11 +30,15 @@
 #include "ui.h"
 #include "inspect.h"
 #include "draw.h"
+#include "capture.h"
 #include "font.h"
 
 #define WIN_W 1360
 #define WIN_H 860
 #define PLOT_H 168
+/* Where the cross-section panel starts, and so where everything above it has
+ * to stop. */
+#define PLOT_TOP (WIN_H - PLOT_H - 14)
 #define STATS_W 268
 #define CBAR_H 14
 #define LS_UNDO_MAX 32
@@ -1013,7 +1017,11 @@ static void gizmo_drag(App *a, const Camera *cam, int mx, int my) {
 
 static void insp_rect(const App *a, int *x, int *y, int *w, int *h) {
     *x = WIN_W - STATS_W - 12;
-    *y = 44 + INSP_TOP + ((a->view == 2) ? 100 : 0);
+    /* Drop below the probe readout when there is one. The probe panel is
+     * drawn on exactly this condition, and it is drawn AFTER the inspector,
+     * so getting this wrong does not overlap visibly -- it silently hides the
+     * inspector's first four rows underneath it. */
+    *y = 44 + INSP_TOP + (a->shade_heat ? 100 : 0);
     *w = STATS_W;
     *h = (WIN_H - PLOT_H - 26) - *y;
 }
@@ -1506,20 +1514,29 @@ int main(int argc, char **argv) {
             printf("  FILE    R re-solve   S save PPM   W save scene   B export Blender\n");
             printf("  HELP    H every key, on screen\n");
             printf("  ESC     cancel, then deselect, then quit\n\n");
+            printf("  --capture FILE [--capture-out DIR]\n");
+            printf("          replay a capture script and write the frames as PPM;\n");
+            printf("          set SDL_VIDEODRIVER=dummy to run it without a window\n\n");
             printf("  Click to select. Drag the selection to move it, or use the axis\n");
             printf("  handles and rotation rings on the gizmo. Drag elsewhere to orbit\n");
             printf("  (3D view only). In the inspector, drag a row to scrub or type.\n");
             return 0;
         }
+        /* Skip the value of a flag that takes one, or --capture's script
+         * path would be picked up as the scene to open. */
+        if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "--capture-out")) { ++i; continue; }
         if (argv[i][0] != '-' && !scene_arg) scene_arg = argv[i];
     }
     int want_view = -1;
     bool want_fine = false;
+    const char *cap_script = NULL, *cap_out = "out/shots";
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--3d")   || !strcmp(argv[i], "--render")) want_view = 0;
         else if (!strcmp(argv[i], "--top"))  want_view = 1;
         else if (!strcmp(argv[i], "--heat") || !strcmp(argv[i], "--field"))  want_view = 2;
         else if (!strcmp(argv[i], "--fine")) want_fine = true;
+        else if (!strcmp(argv[i], "--capture") && i + 1 < argc) cap_script = argv[++i];
+        else if (!strcmp(argv[i], "--capture-out") && i + 1 < argc) cap_out = argv[++i];
     }
     App a;
     memset(&a, 0, sizeof a);
@@ -1591,8 +1608,20 @@ int main(int argc, char **argv) {
     }
     SDL_Window *win = SDL_CreateWindow("lightsim", SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED, WIN_W, WIN_H, SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!win) {
+        fprintf(stderr, "SDL window failed: %s\n", SDL_GetError());
+        return 1;
+    }
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    /* No GPU here: the dummy video driver a capture runs under has none, and
+     * neither do some remote sessions. Fall back rather than carry on with a
+     * NULL renderer, which draws nothing and reports nothing. */
+    if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+    if (!ren) {
+        fprintf(stderr, "SDL renderer failed: %s\n", SDL_GetError());
+        return 1;
+    }
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     /* With ALLOW_HIGHDPI the renderer's backing store is larger than the
      * window (2x on a Retina display), so drawing in window coordinates would
@@ -1605,6 +1634,14 @@ int main(int argc, char **argv) {
     status_init(&a.log);
     ui_init(&a.t, WIN_H);
     SDL_StartTextInput();
+
+    Capture *cap = NULL;
+    if (cap_script) {
+        char caperr[256];
+        cap = capture_open(cap_script, cap_out, caperr, sizeof caperr);
+        if (!cap) { fprintf(stderr, "capture: %s\n", caperr); return 1; }
+        printf("capturing %s into %s/\n", cap_script, cap_out);
+    }
 
     /* Canvas geometry. */
     int cx = UI_TOOLBAR_W + 18, cy = 44;
@@ -1641,6 +1678,10 @@ int main(int argc, char **argv) {
     char buf[128];
 
     while (running) {
+        /* Before the poll, so this frame's scripted input is waiting in the
+         * same queue a human's would be and takes the same path through it. */
+        if (cap && !capture_begin_frame(cap)) break;
+
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
@@ -1995,7 +2036,12 @@ int main(int argc, char **argv) {
          * the picture moving under you. */
         {
             int CW = WIN_W - cx - STATS_W - 30;
-            int CH = WIN_H - cy - PLOT_H - 46 - CBAR_H;
+            /* Reserved under the canvas, always -- including when the colour
+             * bar is not showing. Sizing this per mode would resize the
+             * picture every time HEAT MAP is toggled, and that toggle is
+             * meant to recolour the view in place, not reframe it. */
+            const int FOOT = 10 + CBAR_H + 5 + FONT_H + 8 + FONT_H + 12;
+            int CH = PLOT_TOP - cy - FOOT;
             int fit = CW < CH ? CW : CH;
             a.view_x = a.fmap_x = cx;
             a.view_y = a.fmap_y = cy;
@@ -2034,7 +2080,10 @@ int main(int argc, char **argv) {
             UiRect canvas = { a.view_x, a.view_y, side_c, side_c };
             draw_status(ren, &a.log, canvas, SDL_GetTicks());
 
-            int hint_y = a.view_y + side_c + (a.shade_heat ? CBAR_H + 26 : 12);
+            /* Clear of the colour bar AND of the tick labels under it: the bar
+             * starts 10 below the canvas and its labels another 5 below that,
+             * so anything less than CBAR_H + 34 has the two lines touching. */
+            int hint_y = a.view_y + side_c + (a.shade_heat ? CBAR_H + 34 : 12);
             snprintf(buf, sizeof buf, "%d PASSES   %s   %s",
                      atomic_load(&a.passes),
                      a.shade_heat ? "ILLUMINANCE ON EVERY SURFACE" : "RADIANCE",
@@ -2099,7 +2148,7 @@ int main(int argc, char **argv) {
         }
 
         /* ---- cross-section ---- */
-        int plot_y = WIN_H - PLOT_H - 14;
+        int plot_y = PLOT_TOP;
         if ((a.view == 2) && a.nu > 0) {
             int j = a.have_hover ? a.hover_j : a.nv / 2;
             double *full = malloc((size_t)a.nu * sizeof *full);
@@ -2132,9 +2181,14 @@ int main(int argc, char **argv) {
             draw_help(ren, &a.t, a.st, full);
         }
 
+        if (cap) capture_end_frame(cap, ren);
         SDL_RenderPresent(ren);
     }
 
+    if (cap) {
+        printf("capture: wrote %d frame(s) into %s/\n", capture_written(cap), cap_out);
+        capture_free(cap);
+    }
     atomic_store(&a.quit, true);
     pthread_join(rt, NULL);
     SDL_DestroyTexture(rend_tex);

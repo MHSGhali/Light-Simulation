@@ -1,0 +1,40 @@
+# The four stills of the viewer's chrome, in one run.
+#
+# Coordinates are window pixels at 1360x860: the toolbar is a column of
+# buttons centred on x=84, the canvas spans (186,44)..(757,615), and the
+# inspector's rows run down the panel at x=1088.
+
+wait 5000                   # let the progressive render settle
+
+# --- docs/viewer.png -------------------------------------------------------
+# Click to select; the gizmo and the inspector come with the selection.
+drag 470 320 470 342 500    # a little orbit, to stand the floor in the frame
+wait 2500
+click 530 320               # the sphere
+wait 3000
+shot viewer
+
+# --- docs/viewer-help.png --------------------------------------------------
+# Every command in one place, the toolbar half of it generated from the
+# buttons themselves.
+key H
+wait 1200
+shot help
+key Escape                  # close the help, leaving the sphere selected
+wait 400
+
+# --- docs/viewer-illuminance.png -------------------------------------------
+# Every surface shaded by the illuminance arriving at it, read under the cursor.
+key 3
+wait 9000
+move 400 500                # a point on the work surface
+wait 800
+shot illuminance
+
+# --- docs/viewer-buttons.png -----------------------------------------------
+# A refused button says why, in the same words its tooltip uses.
+key Escape                  # deselect, so DUPLICATE and DELETE have nothing
+wait 500
+click 84 387                # DUPLICATE
+wait 800
+shot buttons
